@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capabilities for Cloudreve desktop",
-  "windows": ["main", "main_popup", "add-drive", "settings"],
+  "windows": ["main", "main_popup"],
   "permissions": [
     "core:default",
     "core:app:default",
@@ -14,10 +14,6 @@
     "core:event:default",
     "core:image:default",
     "opener:default",
-    {
-      "identifier": "http:default",
-      "allow": [{ "url": "http://**" }, { "url": "https://**" }]
-    },
     "dialog:default",
     "core:window:allow-close",
     "os:default",
@@ -26,6 +22,13 @@
     "deep-link:default",
     "positioner:default",
     "updater:default",
-    "process:allow-restart"
+    "process:allow-restart",
+    "app:allow-get-status-summary",
+    "app:allow-show-add-drive-window",
+    "app:allow-show-settings-window",
+    "app:allow-resolve-conflict",
+    "app:allow-pause-sync",
+    "app:allow-resume-sync",
+    "app:allow-show-file-in-explorer"
   ]
 }

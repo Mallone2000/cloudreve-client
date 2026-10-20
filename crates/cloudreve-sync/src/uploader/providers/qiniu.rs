@@ -62,7 +62,6 @@ where
         target: "uploader::qiniu",
         chunk = chunk.index,
         size = chunk.size,
-        url = %url,
         "Uploading chunk to Qiniu (streaming)"
     );
 
@@ -131,7 +130,6 @@ pub async fn complete_upload(http_client: &HttpClient, session: &UploadSession) 
 
     debug!(
         target: "uploader::qiniu",
-        url = %url,
         parts = request.parts.len(),
         "Completing Qiniu multipart upload"
     );

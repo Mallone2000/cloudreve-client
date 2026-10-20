@@ -7,8 +7,8 @@ use std::path::Path;
 /// Write `contents` to `path`, ensuring the file is only readable and writable
 /// by the current user (mode `0600` on Unix).
 ///
-/// The permissions are applied on every write so a file created before this
-/// hardening (with the default `0644` umask) is tightened on the next save.
+/// Each save replaces the old file with an owner-only temporary file, so an
+/// existing symlink cannot redirect the credential write.
 pub fn write_private<P: AsRef<Path>, C: AsRef<[u8]>>(path: P, contents: C) -> Result<()> {
     let path = path.as_ref();
 
@@ -16,20 +16,25 @@ pub fn write_private<P: AsRef<Path>, C: AsRef<[u8]>>(path: P, contents: C) -> Re
     {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
-        // Create the file with 0600 from the start so it never exists with
-        // loose permissions (avoids a TOCTOU window between write and chmod).
+        let parent = path.parent().context("Credential file has no parent directory")?;
+        let temp = parent.join(format!(".credentials-{}.tmp", uuid::Uuid::new_v4()));
         let mut f = std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
-            .open(path)
-            .with_context(|| format!("Failed to open file {}", path.display()))?;
-        f.write_all(contents.as_ref())
-            .with_context(|| format!("Failed to write file {}", path.display()))?;
-        // OpenOptions::mode only applies when the file is created; tighten an
-        // existing file that predates this hardening.
-        restrict_file(path)?;
+            .open(&temp)
+            .with_context(|| format!("Failed to create private file in {}", parent.display()))?;
+        let result = (|| -> Result<()> {
+            f.write_all(contents.as_ref()).context("Failed to write private file")?;
+            f.sync_all().context("Failed to sync private file")?;
+            drop(f);
+            std::fs::rename(&temp, path).context("Failed to replace credential file")?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temp);
+        }
+        result?;
         return Ok(());
     }
 
@@ -81,6 +86,19 @@ mod tests {
         write_private(&file, b"new").unwrap();
         let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn credential_write_replaces_symlink_without_touching_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside.txt");
+        let file = dir.path().join("drives.json");
+        std::fs::write(&outside, b"keep").unwrap();
+        std::os::unix::fs::symlink(&outside, &file).unwrap();
+        write_private(&file, b"new").unwrap();
+        assert_eq!(std::fs::read(&outside).unwrap(), b"keep");
+        assert_eq!(std::fs::read(&file).unwrap(), b"new");
+        assert!(!std::fs::symlink_metadata(&file).unwrap().file_type().is_symlink());
     }
 }
 

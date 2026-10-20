@@ -7,6 +7,56 @@ use diesel::prelude::*;
 use crate::inventory::schema::task_queue::{self, dsl as task_queue_dsl};
 
 impl InventoryDb {
+    /// Insert a reconciliation batch with one SQLite transaction. The result
+    /// aligns with `tasks`; false means an active duplicate or a failed
+    /// download of the same remote entity already exists.
+    pub fn insert_task_batch(&self, tasks: &[NewTaskRecord]) -> Result<Vec<bool>> {
+        let mut conn = self.connection()?;
+        (&mut *conn).transaction::<Vec<bool>, anyhow::Error, _>(|tx| {
+            let mut inserted = Vec::with_capacity(tasks.len());
+            for task in tasks {
+                if task.task_type == "download" {
+                    if let Some(etag) = task.custom_state.as_ref()
+                        .and_then(|state| state.get("remote_etag"))
+                        .and_then(|value| value.as_str()) {
+                        let latest: Option<TaskRow> = task_queue_dsl::task_queue
+                            .filter(task_queue_dsl::drive_id.eq(&task.drive_id))
+                            .filter(task_queue_dsl::task_type.eq(&task.task_type))
+                            .filter(task_queue_dsl::local_path.eq(&task.local_path))
+                            .order(task_queue_dsl::created_at.desc())
+                            .first(tx).optional()?;
+                        if let Some(previous) = latest.map(TaskRecord::try_from).transpose()? {
+                            let previous_etag = previous.custom_state.as_ref()
+                                .and_then(|state| state.get("remote_etag"))
+                                .and_then(|value| value.as_str());
+                            if previous.status == TaskStatus::Failed && previous_etag == Some(etag) {
+                                inserted.push(false);
+                                continue;
+                            }
+                        }
+                    }
+                }
+                let active: Option<String> = task_queue_dsl::task_queue
+                    .filter(task_queue_dsl::drive_id.eq(&task.drive_id))
+                    .filter(task_queue_dsl::task_type.eq(&task.task_type))
+                    .filter(task_queue_dsl::local_path.eq(&task.local_path))
+                    .filter(task_queue_dsl::status.eq_any([TaskStatus::Pending.as_str(), TaskStatus::Running.as_str()]))
+                    .select(task_queue_dsl::id)
+                    .first(tx).optional()?;
+                if active.is_some() {
+                    inserted.push(false);
+                    continue;
+                }
+                let row = NewTaskRow::try_from(task)?;
+                diesel::insert_into(task_queue::table)
+                    .values(&row)
+                    .execute(tx)?;
+                inserted.push(true);
+            }
+            Ok(inserted)
+        })
+    }
+
     /// Insert a task queue record if no pending/running task with the same type and path exists.
     /// Returns `true` if the task was inserted, `false` if a duplicate was found.
     pub fn insert_task_if_not_exist(&self, task: &NewTaskRecord) -> Result<bool> {

@@ -6,6 +6,7 @@ use std::path::PathBuf;
 pub enum TaskKind {
     Upload,
     Download,
+    VerifyCollision,
 }
 
 impl TaskKind {
@@ -13,6 +14,7 @@ impl TaskKind {
         match self {
             TaskKind::Upload => "upload",
             TaskKind::Download => "download",
+            TaskKind::VerifyCollision => "verify_collision",
         }
     }
 
@@ -20,6 +22,7 @@ impl TaskKind {
         match value {
             "upload" => Some(TaskKind::Upload),
             "download" => Some(TaskKind::Download),
+            "verify_collision" => Some(TaskKind::VerifyCollision),
             _ => None,
         }
     }
@@ -59,6 +62,10 @@ impl TaskPayload {
 
     pub fn download(local_path: impl Into<PathBuf>) -> Self {
         Self::new(TaskKind::Download, local_path)
+    }
+
+    pub fn verify_collision(local_path: impl Into<PathBuf>) -> Self {
+        Self::new(TaskKind::VerifyCollision, local_path)
     }
 
     pub fn with_task_id(mut self, id: impl Into<String>) -> Self {

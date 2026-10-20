@@ -1,5 +1,5 @@
 use crate::drive::mounts::Mount;
-use crate::drive::utils::{is_partial_download, remote_path_to_local_relative_path};
+use crate::drive::utils::{is_partial_download, remote_path_to_local_relative_path, SafeSyncPath};
 use crate::inventory::{MetadataEntry, FileMetadata};
 use crate::tasks::TaskPayload;
 use crate::utils::disk_space;
@@ -14,6 +14,7 @@ use cloudreve_api::{
     },
 };
 use notify_debouncer_full::DebouncedEvent;
+use futures::{stream, StreamExt};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -91,7 +92,7 @@ pub fn group_fs_events(events: Vec<DebouncedEvent>) -> GroupedFsEvents {
 /// - `(true, false, false)` : deleted from both → clean DB entry
 /// - `(false, true, false)` : new local file → upload
 /// - `(false, false, true)` : new remote file → download
-/// - `(false, true, true)` : exists on both sides, not yet tracked → mark as synced in DB
+/// - `(false, true, true)` : exists on both sides, not yet tracked → verify bytes before adoption
 /// - `(true, true, true)` : already in sync, SSE handles live changes
 /// Total size of the remote files that have no local copy yet — the bytes a
 /// sync would have to write to disk. Saturates rather than wrapping so an
@@ -194,6 +195,10 @@ pub async fn full_sync(mount: &Mount, local_root: &PathBuf, remote_path: &str) -
         .collect();
 
     let drive_uuid = Uuid::parse_str(&mount.id).ok();
+    let mut inventory_deletes: Vec<String> = Vec::new();
+    let mut collision_entries: Vec<MetadataEntry> = Vec::new();
+    let mut collision_verifications: Vec<(PathBuf, String)> = Vec::new();
+    let mut scheduled_tasks: Vec<TaskPayload> = Vec::new();
 
     // One snapshot for the whole merge: a Settings save landing mid-loop must
     // not apply the new rules to half the tree and the old ones to the rest.
@@ -208,7 +213,14 @@ pub async fn full_sync(mount: &Mount, local_root: &PathBuf, remote_path: &str) -
     };
 
     for rel in &all_paths {
-        let local_path = local_root.join(rel);
+        let local_path = match SafeSyncPath::from_relative_path(rel)
+            .and_then(|safe| safe.join_checked(local_root)) {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::warn!(target: "drive::sync", path = %rel.display(), error = %error, "Unsafe path skipped");
+                continue;
+            }
+        };
         let in_remote = remote_map.contains_key(rel);
         let in_local = local_set.contains(rel);
         let in_db = db_set.contains(rel);
@@ -233,24 +245,15 @@ pub async fn full_sync(mount: &Mount, local_root: &PathBuf, remote_path: &str) -
         match (in_db, in_local, in_remote) {
             // Deleted locally (still on server) → forget it, don't re-download, don't touch server
             (true, false, true) => {
-                mount
-                    .inventory
-                    .batch_delete_by_path(vec![&path_str])
-                    .context("Failed to forget locally-deleted file in inventory")?;
+                inventory_deletes.push(path_str.clone());
             }
             // Deleted from server (still local) → keep local copy, forget tracking
             (true, true, false) => {
-                mount
-                    .inventory
-                    .batch_delete_by_path(vec![&path_str])
-                    .context("Failed to forget server-deleted file in inventory")?;
+                inventory_deletes.push(path_str.clone());
             }
             // Deleted from both → clean DB
             (true, false, false) => {
-                mount
-                    .inventory
-                    .batch_delete_by_path(vec![&path_str])
-                    .context("Failed to clean inventory entry for file deleted on both sides")?;
+                inventory_deletes.push(path_str.clone());
             }
             // New local file → upload
             (false, true, false) => {
@@ -265,7 +268,7 @@ pub async fn full_sync(mount: &Mount, local_root: &PathBuf, remote_path: &str) -
                         continue;
                     }
                 }
-                mount.task_queue.enqueue(TaskPayload::upload(local_path)).await?;
+                scheduled_tasks.push(TaskPayload::upload(local_path));
             }
             // New remote file → download
             (false, false, true) => {
@@ -292,30 +295,43 @@ pub async fn full_sync(mount: &Mount, local_root: &PathBuf, remote_path: &str) -
                         payload = payload
                             .with_custom_state(serde_json::json!({ "remote_etag": etag }));
                     }
-                    mount.task_queue.enqueue(payload).await?;
+                    scheduled_tasks.push(payload);
                 }
             }
-            // Exists on both sides but not tracked → mark as synced in DB (no transfer needed)
+            // Existing files at the same path are not evidence of equal content.
             (false, true, true) => {
                 if let (Some(rf), Some(uuid)) = (remote_map.get(rel), drive_uuid) {
                     let parse_ts = |s: &str| -> i64 {
                         chrono::DateTime::parse_from_rfc3339(s).map(|dt| dt.timestamp()).unwrap_or(0)
                     };
-                    let entry = MetadataEntry::new(uuid, &path_str, false)
+                    let mut entry = MetadataEntry::new(uuid, &path_str, false)
                         .with_created_at(parse_ts(&rf.created_at))
                         .with_updated_at(parse_ts(&rf.updated_at))
                         .with_etag(rf.primary_entity.clone().unwrap_or_default())
                         .with_size(rf.size)
                         .with_local_mtime(crate::inventory::local_mtime_secs(&local_path));
-                    mount
-                        .inventory
-                        .upsert(&entry)
-                        .context("Failed to mark existing file as synced in inventory")?;
+                    let local_size = std::fs::metadata(&local_path).map(|m| m.len()).unwrap_or(u64::MAX);
+                    if local_size != rf.size.max(0) as u64 || rf.primary_entity.as_deref().is_none_or(str::is_empty) {
+                        entry.conflict_state = Some(crate::inventory::ConflictState::Pending);
+                    } else {
+                        entry.conflict_state = Some(crate::inventory::ConflictState::Verifying);
+                        collision_verifications.push((local_path, rf.primary_entity.clone().unwrap_or_default()));
+                    }
+                    collision_entries.push(entry);
                 }
             }
             // Already tracked and present everywhere → check for modifications
             (true, true, true) => {
                 if let (Some(db_entry), Some(rf)) = (db_map.get(rel), remote_map.get(rel)) {
+                    if db_entry.conflict_state == Some(crate::inventory::ConflictState::Verifying) {
+                        if rf.primary_entity.as_deref().is_none_or(str::is_empty) {
+                            mount.inventory.mark_as_conflicted(&path_str, Some(crate::inventory::ConflictState::Pending))?;
+                        } else {
+                            scheduled_tasks.push(TaskPayload::verify_collision(local_path)
+                                .with_custom_state(serde_json::json!({"remote_etag": rf.primary_entity.clone()})));
+                        }
+                        continue;
+                    }
                     // Files with an unresolved conflict are frozen: no transfer
                     // until the user resolves them.
                     if db_entry.conflict_state.is_some() {
@@ -391,7 +407,7 @@ pub async fn full_sync(mount: &Mount, local_root: &PathBuf, remote_path: &str) -
                                 serde_json::json!({ "remote_etag": remote_etag }),
                             );
                         }
-                        mount.task_queue.enqueue(payload).await?;
+                        scheduled_tasks.push(payload);
                     } else if local_changed {
                         let local_size = std::fs::metadata(&local_path)
                             .map(|m| m.len() as i64)
@@ -412,12 +428,33 @@ pub async fn full_sync(mount: &Mount, local_root: &PathBuf, remote_path: &str) -
                             local_size = local_size,
                             "Local file modified since last sync, uploading"
                         );
-                        mount.task_queue.enqueue(TaskPayload::upload(local_path)).await?;
+                        scheduled_tasks.push(TaskPayload::upload(local_path));
                     }
                 }
             }
             (false, false, false) => {}
         }
+    }
+
+    if !collision_entries.is_empty() {
+        let inventory = mount.inventory.clone();
+        tokio::task::spawn_blocking(move || inventory.batch_upsert(&collision_entries))
+            .await.context("Collision inventory write panicked")??;
+        for (path, etag) in collision_verifications {
+            scheduled_tasks.push(TaskPayload::verify_collision(path)
+                .with_custom_state(serde_json::json!({"remote_etag": etag})));
+        }
+        mount.task_queue.notifier().notify();
+    }
+
+    mount.task_queue.enqueue_many(scheduled_tasks).await?;
+
+    if !inventory_deletes.is_empty() {
+        let inventory = mount.inventory.clone();
+        tokio::task::spawn_blocking(move || {
+            let paths: Vec<&str> = inventory_deletes.iter().map(String::as_str).collect();
+            inventory.batch_delete_by_path(paths)
+        }).await.context("Inventory cleanup task panicked")??;
     }
 
     tracing::info!(target: "drive::sync", id = %mount.id, "Full sync complete");
@@ -442,54 +479,71 @@ async fn list_remote_recursive(mount: &Mount, base: &CrUri) -> Result<Vec<FileRe
     // Learned from the first response, then reused for every later directory.
     let mut server_page_size: Option<i32> = None;
 
-    while let Some(dir) = dirs.pop() {
-        let uri = dir.to_string();
-        // Frozen for the whole directory: changing the page size mid-listing
-        // would shift the offset windows and skip or duplicate entries.
+    while !dirs.is_empty() {
         let page_size = server_page_size.unwrap_or(INITIAL_PAGE_SIZE);
-        let mut previous: Option<ListAllRes<ListResponse>> = None;
-        let mut last_position: Option<(i32, Option<String>)> = None;
-
-        loop {
-            let mut response = mount
-                .cr_client
-                .list_files_all(previous.as_ref(), &uri, page_size)
-                .await
-                .context("Failed to list remote directory")?;
-
-            if server_page_size.is_none() && response.res.props.max_page_size > 0 {
-                server_page_size = Some(response.res.props.max_page_size);
+        let client = mount.cr_client.clone();
+        let base = base.clone();
+        let batch = std::mem::take(&mut dirs);
+        let mut listings = stream::iter(batch.into_iter().map(|dir| {
+            let client = client.clone();
+            let base = base.clone();
+            async move { list_one_remote_directory(client, dir, base, page_size).await }
+        })).buffer_unordered(4);
+        while let Some(result) = listings.next().await {
+            let (files, children, learned_page_size) = result?;
+            if server_page_size.is_none() {
+                server_page_size = learned_page_size;
             }
-
-            for item in std::mem::take(&mut response.res.files) {
-                if item.file_type == file_type::FOLDER {
-                    if let Ok(child_uri) = CrUri::new(&item.path) {
-                        dirs.push(child_uri);
-                    }
-                }
-                all.push(item);
-            }
-
-            if !response.more {
-                break;
-            }
-
-            // A server that keeps announcing more pages while handing back the
-            // same position would loop forever; fail loudly instead.
-            let position = (
-                response.res.pagination.page,
-                response.res.pagination.next_token.clone(),
-            );
-            if last_position.as_ref() == Some(&position) {
-                anyhow::bail!("Remote listing of {uri} is not advancing past page {}", position.0);
-            }
-            last_position = Some(position);
-
-            previous = Some(response);
+            all.extend(files);
+            dirs.extend(children);
         }
     }
 
     Ok(all)
+}
+
+async fn list_one_remote_directory(
+    client: std::sync::Arc<cloudreve_api::Client>,
+    dir: CrUri,
+    base: CrUri,
+    page_size: i32,
+) -> Result<(Vec<FileResponse>, Vec<CrUri>, Option<i32>)> {
+    let uri = dir.to_string();
+    let mut files = Vec::new();
+    let mut children = Vec::new();
+    let mut learned_page_size = None;
+    let mut previous: Option<ListAllRes<ListResponse>> = None;
+    let mut last_position: Option<(i32, Option<String>)> = None;
+    loop {
+        // Page size is frozen within a directory to keep offset windows stable.
+        let mut response = client.list_files_all(previous.as_ref(), &uri, page_size).await
+            .context("Failed to list remote directory")?;
+        if learned_page_size.is_none() && response.res.props.max_page_size > 0 {
+            learned_page_size = Some(response.res.props.max_page_size);
+        }
+        for item in std::mem::take(&mut response.res.files) {
+            if item.file_type == file_type::FOLDER {
+                if let Ok(child) = CrUri::new(&item.path) {
+                    if remote_path_to_local_relative_path(&child, &base).is_ok() {
+                        children.push(child);
+                    } else {
+                        tracing::warn!(target: "drive::sync", "Unsafe remote folder URI skipped");
+                    }
+                }
+            }
+            files.push(item);
+        }
+        if !response.more {
+            break;
+        }
+        let position = (response.res.pagination.page, response.res.pagination.next_token.clone());
+        if last_position.as_ref() == Some(&position) {
+            anyhow::bail!("Remote listing of {uri} is not advancing past page {}", position.0);
+        }
+        last_position = Some(position);
+        previous = Some(response);
+    }
+    Ok((files, children, learned_page_size))
 }
 
 /// Read the last-known synced state for a drive, off the runtime thread.
@@ -520,21 +574,23 @@ async fn load_db_entries(
 /// uploads and the UI's status polling included.
 async fn walk_local(root: PathBuf) -> Result<Vec<PathBuf>> {
     tokio::task::spawn_blocking(move || {
-        if !root.is_dir() {
+        let root_is_real_dir = std::fs::symlink_metadata(&root)
+            .is_ok_and(|meta| meta.is_dir() && !meta.file_type().is_symlink());
+        if !root_is_real_dir {
             anyhow::bail!(
                 "Sync folder is not reachable: {} (deleted, or its volume is not mounted)",
                 root.display()
             );
         }
         let mut files = Vec::new();
-        walk_dir_recursive(&root, &mut files)?;
+        walk_dir_recursive(&root, &root, &mut files)?;
         Ok(files)
     })
     .await
     .context("Local walk panicked")?
 }
 
-fn walk_dir_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+fn walk_dir_recursive(root: &Path, dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
     // Only the root is a hard requirement; a subdirectory removed mid-walk is
     // ordinary churn, not a reason to abort the whole sync.
     if !dir.is_dir() {
@@ -543,8 +599,18 @@ fn walk_dir_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
     for entry in std::fs::read_dir(dir).context("Failed to read directory")? {
         let entry = entry?;
         let path = entry.path();
-        if path.is_dir() {
-            walk_dir_recursive(&path, files)?;
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.file_type().is_symlink() {
+            tracing::warn!(target: "drive::sync", path = %path.display(), "Symlink skipped during local scan");
+            crate::utils::toast::send_skipped_symlink_toast(root, &path);
+            continue;
+        }
+        if metadata.is_dir() {
+            walk_dir_recursive(root, &path, files)?;
         } else if !is_partial_download(&path) {
             // A download in flight is not a local file the user created.
             files.push(path);
@@ -591,6 +657,18 @@ mod tests {
         let found = walk_local(dir.path().to_path_buf()).await.unwrap();
 
         assert_eq!(found, vec![dir.path().join("real.txt")]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_local_scan_skips_symlink_files_and_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret"), b"secret").unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("linked-dir")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("secret"), root.path().join("linked-file")).unwrap();
+        std::fs::write(root.path().join("real"), b"real").unwrap();
+        assert_eq!(walk_local(root.path().to_path_buf()).await.unwrap(), vec![root.path().join("real")]);
     }
 
     fn sized(size: i64) -> FileResponse {

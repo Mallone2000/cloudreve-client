@@ -128,8 +128,23 @@ impl CrUri {
             return Err(anyhow::anyhow!("Invalid cloudreve URI prefix: {}", u));
         }
 
+        // Url::parse normalizes dot segments. Reject them before parsing so a
+        // remote path cannot conceal traversal by normalizing back into root.
+        let raw_path = u[CR_URI_PREFIX.len()..].split_once('/')
+            .map(|(_, path)| path.split(['?', '#']).next().unwrap_or(""))
+            .unwrap_or("");
+        for segment in raw_path.split('/') {
+            let lower = segment.to_ascii_lowercase();
+            let decoded = percent_encoding::percent_decode_str(segment).decode_utf8()
+                .map_err(|_| anyhow::anyhow!("Invalid cloudreve URI path encoding"))?;
+            if decoded == "." || decoded == ".."
+                || lower.contains("%2f") || lower.contains("%5c") || lower.contains("%00") {
+                return Err(anyhow::anyhow!("Unsafe cloudreve URI path"));
+            }
+        }
+
         // Replace prefix with standard HTTP for compatibility
-        let u = u.replace(CR_URI_PREFIX, HTTP_URI_PREFIX);
+        let u = u.replacen(CR_URI_PREFIX, HTTP_URI_PREFIX, 1);
         let mut url = Url::parse(&u)?;
 
         // Remove ending slash if present

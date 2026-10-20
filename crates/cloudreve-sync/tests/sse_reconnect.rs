@@ -178,6 +178,7 @@ async fn stalled_sse_connection_triggers_reconnect() {
         },
         sync_path: sync_dir,
         enabled: true,
+        allow_insecure_http: true,
         user_id: "test".into(),
         sse_client_id: uuid::Uuid::new_v4().to_string(),
         ..Default::default()

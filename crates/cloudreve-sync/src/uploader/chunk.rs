@@ -94,6 +94,7 @@ impl ChunkReader {
     /// Create a new chunk reader for a specific byte range
     pub async fn new(
         path: &Path,
+        sync_root: &Path,
         offset: u64,
         size: u64,
         encryption: Option<EncryptionConfig>,
@@ -105,7 +106,11 @@ impl ChunkReader {
         // let protected_handle = placeholder
         //     .win32_handle()
         //     .context("failed to get win32 handle")?;
-        let file = File::open(path).await.context("failed to open file")?;
+        let safe = crate::drive::utils::SafeSyncPath::from_local(path, sync_root)?;
+        let root = sync_root.to_path_buf();
+        let file = tokio::task::spawn_blocking(move || safe.open_read_checked(&root))
+            .await.context("file open task panicked")??;
+        let file = File::from_std(file);
         let mut reader = BufReader::with_capacity(STREAM_BUFFER_SIZE, file);
         reader.seek(SeekFrom::Start(offset)).await?;
 
@@ -122,6 +127,25 @@ impl ChunkReader {
     #[allow(dead_code)]
     pub fn size(&self) -> u64 {
         self.position + self.remaining
+    }
+}
+
+#[cfg(all(test, unix))]
+mod path_safety_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn upload_open_rejects_directory_swapped_to_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("folder")).unwrap();
+        let path = root.path().join("folder/file");
+        std::fs::write(&path, b"inside").unwrap();
+        std::fs::write(outside.path().join("file"), b"outside").unwrap();
+        std::fs::rename(root.path().join("folder"), root.path().join("old-folder")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("folder")).unwrap();
+        assert!(ChunkReader::new(&path, root.path(), 0, 6, None).await.is_err());
+        assert_eq!(std::fs::read(outside.path().join("file")).unwrap(), b"outside");
     }
 }
 
@@ -198,10 +222,11 @@ impl ChunkStream {
     /// Create a chunk stream from file path and chunk info
     pub async fn from_chunk(
         path: &Path,
+        sync_root: &Path,
         chunk: &ChunkInfo,
         encryption: Option<EncryptionConfig>,
     ) -> Result<Self> {
-        let reader = ChunkReader::new(path, chunk.offset, chunk.size, encryption).await?;
+        let reader = ChunkReader::new(path, sync_root, chunk.offset, chunk.size, encryption).await?;
         Ok(Self::new(reader))
     }
 }
@@ -289,6 +314,7 @@ impl ChunkUploader {
     pub async fn upload_all<P: ProgressCallback + 'static>(
         &self,
         local_path: &Path,
+        sync_root: &Path,
         session: &mut UploadSession,
         progress_callback: Arc<P>,
         cancel_token: &CancellationToken,
@@ -361,6 +387,7 @@ impl ChunkUploader {
         let result = self
             .upload_chunks_with_pool(
                 local_path,
+                sync_root,
                 session,
                 &pending_chunks,
                 encryption,
@@ -389,6 +416,7 @@ impl ChunkUploader {
     async fn upload_chunks_with_pool(
         &self,
         local_path: &Path,
+        sync_root: &Path,
         session: &mut UploadSession,
         pending_chunks: &[usize],
         encryption: Option<EncryptionConfig>,
@@ -420,6 +448,7 @@ impl ChunkUploader {
 
         // Local path needs to be owned for spawned tasks
         let local_path = local_path.to_path_buf();
+        let sync_root = sync_root.to_path_buf();
 
         // Spawn initial workers up to concurrency limit
         let mut handles = Vec::with_capacity(concurrency);
@@ -429,6 +458,7 @@ impl ChunkUploader {
                 pool_state.worker_started();
                 let handle = self.spawn_chunk_worker(
                     local_path.clone(),
+                    sync_root.clone(),
                     chunk,
                     encryption.clone(),
                     Arc::clone(tracker),
@@ -478,6 +508,7 @@ impl ChunkUploader {
     fn spawn_chunk_worker(
         &self,
         local_path: PathBuf,
+        sync_root: PathBuf,
         initial_chunk: ChunkInfo,
         encryption: Option<EncryptionConfig>,
         tracker: Arc<ProgressTracker>,
@@ -519,6 +550,7 @@ impl ChunkUploader {
                     policy_type,
                     &config,
                     &local_path,
+                    &sync_root,
                     &chunk,
                     encryption.clone(),
                     &tracker,
@@ -685,6 +717,7 @@ async fn upload_chunk_with_retry(
     policy_type: PolicyType,
     config: &UploaderConfig,
     local_path: &Path,
+    sync_root: &Path,
     chunk: &ChunkInfo,
     encryption: Option<EncryptionConfig>,
     tracker: &Arc<ProgressTracker>,
@@ -718,7 +751,7 @@ async fn upload_chunk_with_retry(
         }
 
         // Create a fresh stream for each attempt
-        let inner_stream = ChunkStream::from_chunk(local_path, chunk, encryption.clone())
+        let inner_stream = ChunkStream::from_chunk(local_path, sync_root, chunk, encryption.clone())
             .await
             .map_err(|e| UploadError::FileReadError(format!("Failed to create stream: {}", e)))?;
 

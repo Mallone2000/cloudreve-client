@@ -20,6 +20,9 @@ use tokio::sync::{Mutex, RwLock, mpsc};
 
 pub struct DriveManager {
     pub(super) drives: Arc<RwLock<HashMap<String, Arc<Mount>>>>,
+    /// Configurations awaiting explicit consent must never construct a Mount:
+    /// its task queue replays persisted work during construction.
+    pending_http: Arc<RwLock<HashMap<String, DriveConfig>>>,
     config_dir: PathBuf,
     pub(super) inventory: Arc<InventoryDb>,
     pub(super) command_tx: mpsc::UnboundedSender<ManagerCommand>,
@@ -28,6 +31,102 @@ pub struct DriveManager {
     pub(super) event_broadcaster: Arc<EventBroadcaster>,
     pub(super) summary_notifier: Arc<SummaryNotifier>,
     heartbeat_manager: HeartbeatManager,
+}
+
+#[cfg(test)]
+mod http_consent_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn pending_http_drive_makes_no_startup_request_and_survives_persist() {
+        let temp = tempfile::tempdir().unwrap();
+        let server = wiremock::MockServer::start().await;
+        let drives = Arc::new(RwLock::new(HashMap::new()));
+        let broadcaster = Arc::new(EventBroadcaster::new(16));
+        let notifier = Arc::new(SummaryNotifier::new(broadcaster.clone()));
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let manager = DriveManager {
+            heartbeat_manager: HeartbeatManager::new(drives.clone(), broadcaster.clone()),
+            drives,
+            pending_http: Arc::new(RwLock::new(HashMap::new())),
+            config_dir: temp.path().to_path_buf(),
+            inventory: Arc::new(InventoryDb::with_path(temp.path().join("meta.db")).unwrap()),
+            command_tx,
+            command_rx: Arc::new(Mutex::new(Some(command_rx))),
+            processor_handle: Arc::new(Mutex::new(None)),
+            event_broadcaster: broadcaster,
+            summary_notifier: notifier,
+        };
+        let config = DriveConfig {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "old HTTP drive".into(),
+            instance_url: server.uri(),
+            sync_path: temp.path().join("sync"),
+            ..Default::default()
+        };
+        manager.add_drive(config).await.unwrap();
+        manager.persist().await.unwrap();
+        assert!(manager.drives.read().await.is_empty());
+        assert_eq!(manager.pending_http.read().await.len(), 1);
+        assert!(manager.list_drives().await[0].transport_consent_required);
+        assert!(server.received_requests().await.unwrap().is_empty());
+        assert_eq!(serde_json::from_str::<DriveState>(&std::fs::read_to_string(temp.path().join("drives.json")).unwrap()).unwrap().drives.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn all_conflict_choices_enqueue_the_expected_transfer() {
+        use crate::inventory::{ConflictState, MetadataEntry};
+
+        let temp = tempfile::tempdir().unwrap();
+        let server = wiremock::MockServer::start().await;
+        let sync_root = temp.path().join("sync");
+        std::fs::create_dir(&sync_root).unwrap();
+        let drives = Arc::new(RwLock::new(HashMap::new()));
+        let broadcaster = Arc::new(EventBroadcaster::new(16));
+        let notifier = Arc::new(SummaryNotifier::new(broadcaster.clone()));
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let inventory = Arc::new(InventoryDb::with_path(temp.path().join("meta.db")).unwrap());
+        let manager = DriveManager {
+            heartbeat_manager: HeartbeatManager::new(drives.clone(), broadcaster.clone()),
+            drives,
+            pending_http: Arc::new(RwLock::new(HashMap::new())),
+            config_dir: temp.path().to_path_buf(),
+            inventory: inventory.clone(), command_tx: command_tx.clone(),
+            command_rx: Arc::new(Mutex::new(Some(command_rx))),
+            processor_handle: Arc::new(Mutex::new(None)),
+            event_broadcaster: broadcaster, summary_notifier: notifier.clone(),
+        };
+        let drive_id = uuid::Uuid::new_v4();
+        let config = DriveConfig {
+            id: drive_id.to_string(),
+            instance_url: server.uri(),
+            remote_path: "cloudreve://my".into(),
+            sync_path: sync_root.clone(),
+            allow_insecure_http: true,
+            ..Default::default()
+        };
+        let mount = Arc::new(Mount::new(config, inventory.clone(), command_tx, notifier).await);
+        manager.drives.write().await.insert(drive_id.to_string(), mount);
+
+        for (name, choice, expected) in [
+            ("local.txt", ConflictResolution::KeepLocal, "upload"),
+            ("remote.txt", ConflictResolution::KeepRemote, "download"),
+            ("both.txt", ConflictResolution::KeepBoth, "download"),
+        ] {
+            let path = sync_root.join(name);
+            std::fs::write(&path, b"local").unwrap();
+            let path_string = path.to_str().unwrap();
+            inventory.upsert(&MetadataEntry::new(drive_id, path_string, false).with_size(5)).unwrap();
+            inventory.mark_as_conflicted(path_string, Some(ConflictState::Pending)).unwrap();
+            manager.resolve_conflict(&drive_id.to_string(), path_string, choice).await.unwrap();
+            let tasks = inventory.list_tasks(Some(&drive_id.to_string()), None).unwrap();
+            assert!(tasks.iter().any(|task| task.local_path == path_string && task.task_type == expected));
+            if matches!(choice, ConflictResolution::KeepBoth) {
+                assert!(tasks.iter().any(|task| task.task_type == "upload"
+                    && task.local_path.contains("both (conflicted copy ")));
+            }
+        }
+    }
 }
 
 impl DriveManager {
@@ -39,6 +138,11 @@ impl DriveManager {
         if !config_dir.exists() {
             fs::create_dir_all(&config_dir)
                 .context("Failed to create .cloudreve config directory")?;
+        }
+        let config_meta = fs::symlink_metadata(&config_dir)
+            .context("Failed to inspect .cloudreve config directory")?;
+        if !config_meta.is_dir() || config_meta.file_type().is_symlink() {
+            anyhow::bail!(".cloudreve config path must be a real directory");
         }
         // The config dir holds drive credentials (OAuth tokens); keep it
         // owner-only so other local users can't read them.
@@ -52,6 +156,7 @@ impl DriveManager {
         Ok(Self {
             config_dir,
             drives,
+            pending_http: Arc::new(RwLock::new(HashMap::new())),
             inventory: Arc::new(InventoryDb::new().context("Failed to create inventory database")?),
             command_tx,
             command_rx: Arc::new(Mutex::new(Some(command_rx))),
@@ -127,17 +232,19 @@ impl DriveManager {
     /// Persist drive configurations to disk
     pub async fn persist(&self) -> Result<()> {
         let config_file = self.get_config_file();
-        let write_guard = self.drives.write().await;
+        let read_guard = self.drives.read().await;
+        let pending_guard = self.pending_http.read().await;
 
-        tracing::debug!(target: "drive", path = %config_file.display(), count = write_guard.len(), "Persisting drive configurations");
+        tracing::debug!(target: "drive", path = %config_file.display(), count = read_guard.len() + pending_guard.len(), "Persisting drive configurations");
 
         let mut new_state = DriveState::default();
 
         // Update drive states from underlying mounts
-        for (_, mount) in write_guard.iter() {
+        for mount in read_guard.values() {
             let config = mount.get_config().await;
             new_state.drives.push(config);
         }
+        new_state.drives.extend(pending_guard.values().cloned());
 
         let content =
             serde_json::to_string_pretty(&new_state).context("Failed to serialize drive state")?;
@@ -168,14 +275,27 @@ impl DriveManager {
 
     /// Add a new drive
     pub async fn add_drive(&self, mut config: DriveConfig) -> Result<String> {
+        let url = url::Url::parse(&config.instance_url).context("Invalid instance URL")?;
+        if url.username() != "" || url.password().is_some() {
+            anyhow::bail!("Instance URL must not contain credentials");
+        }
+        config.instance_url = url.origin().ascii_serialization();
+        match url.scheme() {
+            "https" => {}
+            "http" if !config.allow_insecure_http => {
+                // This branch must precede favicon retrieval and Mount::new.
+                let id = config.id.clone();
+                self.pending_http.write().await.insert(id.clone(), config);
+                self.summary_notifier.notify();
+                return Ok(id);
+            }
+            "http" => {}
+            _ => anyhow::bail!("Only HTTP and HTTPS Cloudreve sites are supported"),
+        }
         // Fetch favicon if icon_path is not set or doesn't exist
-        if config.icon_path.is_none()
-            || !config
-                .icon_path
-                .as_ref()
-                .map(|p| std::path::Path::new(p).exists())
-                .unwrap_or(false)
-        {
+        let cached_icon_is_safe = |path: &Option<String>| path.as_ref()
+            .is_some_and(|value| favicon::cached_icon_is_safe(value));
+        if !cached_icon_is_safe(&config.icon_path) || !cached_icon_is_safe(&config.raw_icon_path) {
             match favicon::fetch_and_save_favicon(&config.instance_url).await {
                 Ok(result) => {
                     tracing::info!(target: "drive", ico_path = %result.ico_path, raw_path = %result.raw_path, "Favicon fetched successfully");
@@ -202,6 +322,7 @@ impl DriveManager {
         )
         .await;
         if let Err(e) = mount.start().await {
+            mount.shutdown().await;
             tracing::error!(target: "drive", error = ?e, "Failed to start drive");
             return Err(e).context("Failed to start drive");
         }
@@ -272,17 +393,20 @@ impl DriveManager {
     /// 2. Remove the drive from the manager's drive map
     ///
     /// Note: The caller is responsible for calling `persist()` after this to save the config.
-    pub async fn remove_drive(&self, id: &str) -> Result<Option<DriveConfig>> {
+    pub async fn remove_drive(&self, id: &str) -> Result<bool> {
+        if self.pending_http.write().await.remove(id).is_some() {
+            self.inventory.nuke_drive(id)?;
+            self.inventory.delete_drive_props(id)?;
+            self.summary_notifier.notify();
+            return Ok(true);
+        }
         let mut write_guard = self.drives.write().await;
 
         // Remove the mount from the map
         let mount = match write_guard.remove(id) {
             Some(m) => m,
-            None => return Ok(None),
+            None => return Ok(false),
         };
-
-        // Get the config before deleting the mount
-        let config = mount.get_config().await;
 
         // Drop the write guard before calling delete to avoid potential deadlocks
         drop(write_guard);
@@ -291,7 +415,7 @@ impl DriveManager {
         mount.delete().await.context("Failed to delete mount")?;
 
         // Broadcast no_drive event if no drives remain
-        if self.drives.read().await.is_empty() {
+        if self.drives.read().await.is_empty() && self.pending_http.read().await.is_empty() {
             self.event_broadcaster.no_drive();
             // Stop heartbeat when there are no drives to monitor
             self.heartbeat_manager.stop().await;
@@ -299,7 +423,7 @@ impl DriveManager {
 
         tracing::info!(target: "drive::manager", drive_id = %id, "Drive removed successfully");
 
-        Ok(Some(config))
+        Ok(true)
     }
 
     /// Get a drive by ID
@@ -309,13 +433,44 @@ impl DriveManager {
     }
 
     /// List all drives
-    pub async fn list_drives(&self) -> Vec<DriveConfig> {
-        // let read_guard = self.drives.read().await;
-        // read_guard
-        //     .values()
-        //     .map(|mount| mount.get_config())
-        //     .collect()
-        Vec::new()
+    pub async fn list_drives(&self) -> Vec<DriveSummary> {
+        let read_guard = self.drives.read().await;
+        let mut result = Vec::with_capacity(read_guard.len());
+        for mount in read_guard.values() {
+            result.push(DriveSummary::from(&mount.get_config().await));
+        }
+        result.extend(self.pending_http.read().await.values().map(DriveSummary::from));
+        result
+    }
+
+    pub async fn set_insecure_http_consent(&self, id: &str, allow: bool) -> Result<()> {
+        if allow {
+            let mut config = self.pending_http.write().await.remove(id)
+                .ok_or_else(|| anyhow::anyhow!("Drive is not awaiting HTTP consent"))?;
+            config.allow_insecure_http = true;
+            if let Err(error) = self.add_drive(config.clone()).await {
+                config.allow_insecure_http = false;
+                self.pending_http.write().await.insert(id.to_string(), config);
+                return Err(error);
+            }
+        } else {
+            let mount = self.get_drive(id).await
+                .ok_or_else(|| anyhow::anyhow!("Drive is not active"))?;
+            let config = mount.get_config().await;
+            if !url::Url::parse(&config.instance_url).is_ok_and(|url| url.scheme() == "http") {
+                anyhow::bail!("HTTPS drives do not require HTTP consent");
+            }
+            // Await an in-flight heartbeat before returning from revocation.
+            self.heartbeat_manager.stop().await;
+            self.drives.write().await.remove(id);
+            mount.shutdown().await;
+            let mut config = mount.get_config().await;
+            config.allow_insecure_http = false;
+            self.pending_http.write().await.insert(id.to_string(), config);
+            self.heartbeat_manager.start().await;
+        }
+        self.summary_notifier.notify();
+        Ok(())
     }
 
     /// Update drive configuration
@@ -353,7 +508,27 @@ impl DriveManager {
         instance_url: String,
         credentials: Credentials,
         user_id: &str,
+        allow_insecure_http: bool,
     ) -> Result<()> {
+        let parsed = url::Url::parse(&instance_url).context("Invalid instance URL")?;
+        if parsed.scheme() == "http" && !allow_insecure_http {
+            anyhow::bail!("HTTP consent required");
+        }
+        if let Some(mut config) = self.pending_http.write().await.remove(id) {
+            if config.user_id != user_id {
+                self.pending_http.write().await.insert(id.to_string(), config);
+                anyhow::bail!("User ID does not match the existing drive");
+            }
+            config.name = name;
+            config.instance_url = instance_url;
+            config.credentials = credentials;
+            config.allow_insecure_http = allow_insecure_http;
+            if let Err(error) = self.add_drive(config.clone()).await {
+                self.pending_http.write().await.insert(id.to_string(), config);
+                return Err(error);
+            }
+            return Ok(());
+        }
         let read_guard = self.drives.read().await;
         let mount = read_guard
             .get(id)
@@ -364,6 +539,9 @@ impl DriveManager {
             let config = mount.config.read().await;
             if config.user_id != user_id {
                 return Err(anyhow::anyhow!(t!("userIdMismatch")));
+            }
+            if url::Url::parse(&config.instance_url).map(|url| url.origin())? != parsed.origin() {
+                anyhow::bail!("Reauthorization must use the existing site origin");
             }
         }
 
@@ -390,6 +568,7 @@ impl DriveManager {
         config.name = name;
         config.instance_url = instance_url.clone();
         config.credentials = credentials.clone();
+        config.allow_insecure_http = allow_insecure_http;
 
         // Clear icon paths - will be re-fetched
         config.icon_path = None;
@@ -583,7 +762,7 @@ impl DriveManager {
         let mut has_ever_synced = false;
         let mut paused_drives = Vec::new();
         for mount in read_guard.values() {
-            drives.push(mount.get_config().await);
+            drives.push(DriveSummary::from(&mount.get_config().await));
             if mount.get_status_flags().await.is_initial_sync_completed() {
                 has_ever_synced = true;
             }
@@ -591,12 +770,21 @@ impl DriveManager {
                 paused_drives.push(mount.id.clone());
             }
         }
+        for config in self.pending_http.read().await.values() {
+            drives.push(DriveSummary::from(config));
+            paused_drives.push(config.id.clone());
+        }
 
-        // Query recent tasks from inventory (filtered by drive_id if provided)
-        let recent_tasks = self
-            .inventory
-            .query_recent_tasks(drive_id)
-            .context("Failed to query recent tasks")?;
+        // Diesel is synchronous; keep status polling off the async runtime.
+        let inventory = self.inventory.clone();
+        let filter = drive_id.map(str::to_owned);
+        let (recent_tasks, conflicted_files) = tokio::task::spawn_blocking(move || {
+            Ok::<_, anyhow::Error>((
+                inventory.query_recent_tasks(filter.as_deref())?,
+                inventory.query_conflicts(filter.as_deref())?,
+            ))
+        })
+        .await.context("Status inventory query panicked")??;
 
         // Collect running task progress from all task queues
         // Build a map of task_id -> TaskProgress for quick lookup
@@ -632,10 +820,6 @@ impl DriveManager {
 
         // Collect pending conflicts (filtered by drive_id if provided)
         let mut conflicts = Vec::new();
-        let conflicted_files = self
-            .inventory
-            .query_conflicts(drive_id)
-            .context("Failed to query conflicts")?;
         for meta in conflicted_files {
             let meta_drive_id = meta.drive_id.to_string();
             let drive_name = match read_guard.get(&meta_drive_id) {
@@ -702,6 +886,13 @@ impl DriveManager {
         if !matches!(meta.conflict_state, Some(ConflictState::Pending)) {
             anyhow::bail!("File has no pending conflict: {}", local_path);
         }
+        if meta.drive_id.to_string() != drive_id {
+            anyhow::bail!("Conflict belongs to a different drive");
+        }
+        let sync_root = mount.get_sync_path().await;
+        let path = PathBuf::from(local_path);
+        let safe_path = crate::drive::utils::SafeSyncPath::from_local(&path, &sync_root)?;
+        safe_path.join_checked(&sync_root)?;
 
         match resolution {
             ConflictResolution::KeepLocal => {
@@ -722,10 +913,10 @@ impl DriveManager {
                     .await?;
             }
             ConflictResolution::KeepBoth => {
-                let path = PathBuf::from(local_path);
                 if path.exists() {
                     let copy_path = conflicted_copy_path(&path);
-                    fs::rename(&path, &copy_path).with_context(|| {
+                    let safe_copy = crate::drive::utils::SafeSyncPath::from_local(&copy_path, &sync_root)?;
+                    safe_path.rename_checked(&sync_root, &safe_copy).with_context(|| {
                         format!("Failed to rename conflicted file to {}", copy_path.display())
                     })?;
                     mount
@@ -790,6 +981,23 @@ impl DriveManager {
                 user_id: config.user_id.clone(),
                 status,
                 capacity,
+            });
+        }
+
+        for config in self.pending_http.read().await.values() {
+            drives_info.push(DriveInfo {
+                id: config.id.clone(),
+                name: config.name.clone(),
+                instance_url: config.instance_url.clone(),
+                remote_path: config.remote_path.clone(),
+                sync_path: config.sync_path.to_string_lossy().to_string(),
+                icon_path: config.icon_path.clone(),
+                raw_icon_path: config.raw_icon_path.clone(),
+                enabled: config.enabled,
+                paused: true,
+                user_id: config.user_id.clone(),
+                status: DriveInfoStatus::TransportConsentRequired,
+                capacity: None,
             });
         }
 

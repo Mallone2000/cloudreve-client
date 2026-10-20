@@ -32,7 +32,6 @@ where
         target: "uploader::s3",
         chunk = chunk.index,
         size = chunk.size,
-        url = %url,
         "Uploading chunk to S3 (streaming)"
     );
 
@@ -116,7 +115,6 @@ pub async fn complete_upload_oss(http_client: &HttpClient, session: &UploadSessi
 
     debug!(
         target: "uploader::s3",
-        url = %url,
         "Completing OSS multipart upload"
     );
 
@@ -152,7 +150,6 @@ pub async fn complete_upload_s3like(
 
     debug!(
         target: "uploader::s3",
-        url = %url,
         "Completing S3-like multipart upload"
     );
 
@@ -190,7 +187,6 @@ pub async fn complete_upload_obs(http_client: &HttpClient, session: &UploadSessi
 
     debug!(
         target: "uploader::s3",
-        url = %url,
         "Completing OBS multipart upload"
     );
 

@@ -62,6 +62,7 @@ impl HeartbeatManager {
                     let read_guard = drives.read().await;
                     if read_guard.is_empty() {
                         tracing::trace!(target: "heartbeat", "No drives to ping, skipping tick");
+                        drop(read_guard);
                         tokio::time::sleep(tokio::time::Duration::from_secs(interval)).await;
                         continue;
                     }
@@ -77,6 +78,9 @@ impl HeartbeatManager {
                 let mut any_success = false;
 
                 for mount in &mounts_to_ping {
+                    if mount.is_paused() {
+                        continue;
+                    }
                     let ping_result = tokio::time::timeout(
                         tokio::time::Duration::from_secs(PING_TIMEOUT_SECS),
                         mount.cr_client.ping(),
@@ -170,6 +174,7 @@ impl HeartbeatManager {
         let mut guard = self.handle.lock().await;
         if let Some(handle) = guard.take() {
             handle.abort();
+            let _ = handle.await;
         }
     }
 

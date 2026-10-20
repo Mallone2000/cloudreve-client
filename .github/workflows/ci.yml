@@ -8,6 +8,7 @@ on:
       - 'src-tauri/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'ui/**'
       - '.github/workflows/ci.yml'
   pull_request:
     paths:
@@ -15,9 +16,32 @@ on:
       - 'src-tauri/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'ui/**'
       - '.github/workflows/ci.yml'
 
 jobs:
+  frontend:
+    name: Frontend lint and build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+      - name: Install Node.js
+        uses: actions/setup-node@v6.4.0
+        with:
+          node-version: '20'
+      - name: Install Yarn
+        run: npm install -g yarn
+      - name: Install dependencies
+        working-directory: ui
+        run: yarn install --frozen-lockfile
+      - name: Lint
+        working-directory: ui
+        run: yarn lint
+      - name: Type-check and build
+        working-directory: ui
+        run: yarn build
+
   test:
     name: Rust tests
     runs-on: ubuntu-latest
@@ -44,12 +68,16 @@ jobs:
             pkg-config
 
       - name: Run tests
-        run: cargo test -p cloudreve-sync -p cloudreve-api
+        run: cargo test --locked -p cloudreve-sync -p cloudreve-api
+
+      - name: Benchmark 1,000- and 10,000-file recovery
+        run: cargo test --locked -p cloudreve-sync --test reconciliation_benchmark -- --ignored --nocapture
 
       - name: Check desktop crate compiles
-        # tauri-build requires the frontendDist directory to exist,
-        # but type-checking the Rust code doesn't need a real frontend build
-        # need to add ci for frontend part
+        # The frontend job builds the UI; this job checks the Rust desktop crate.
         run: |
           mkdir -p ui/dist
-          cargo check -p cloudreve-desktop
+          cargo check --locked -p cloudreve-desktop
+
+      - name: Test desktop security configuration
+        run: cargo test --locked -p cloudreve-desktop --lib

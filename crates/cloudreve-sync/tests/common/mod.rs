@@ -140,6 +140,7 @@ impl TestEnv {
             },
             sync_path: sync_dir.clone(),
             enabled: true,
+            allow_insecure_http: true,
             user_id: "test-user".to_string(),
             ignore_patterns,
             max_file_size_mb,

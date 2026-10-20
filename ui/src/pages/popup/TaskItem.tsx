@@ -13,6 +13,7 @@ import {
   CloudUpload as UploadIcon,
   CloudDownload as DownloadIcon,
   CloudOff as CloudOffIcon,
+  FactCheck as VerifyIcon,
 } from "@mui/icons-material";
 import { invoke } from "@tauri-apps/api/core";
 import TimeAgo from "react-timeago";
@@ -32,6 +33,7 @@ export default function TaskItem({ task, isActive = false }: TaskItemProps) {
   const liveProgress = activeTask.live_progress;
   const progress = liveProgress?.progress ?? task.progress;
   const isUpload = task.task_type === "upload";
+  const isVerify = task.task_type === "verify_collision";
   const fileName = getFileName(task.local_path);
   const parentFolderName = getParentFolderName(task.local_path);
   const isFailed = task.status === "Failed";
@@ -60,6 +62,7 @@ export default function TaskItem({ task, isActive = false }: TaskItemProps) {
       return <CloudOffIcon sx={{ fontSize: 14 }} color="warning" />;
     }
     if (isActive) {
+      if (isVerify) return <VerifyIcon sx={{ fontSize: 14 }} color="primary" />;
       return isUpload ? (
         <UploadIcon sx={{ fontSize: 14 }} color="primary" />
       ) : (
@@ -88,6 +91,7 @@ export default function TaskItem({ task, isActive = false }: TaskItemProps) {
       return `${processed} / ${total} - ${speed}/s`;
     }
     if (isActive) {
+      if (isVerify) return "Comparing local and remote files...";
       return task.status === "Pending"
         ? t("popup.waiting", "Waiting...")
         : t("popup.processing", "Processing...");

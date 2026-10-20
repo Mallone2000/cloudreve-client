@@ -1,0 +1,18 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "add-drive",
+  "description": "Authorization and folder selection window",
+  "windows": ["add-drive"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:window:default",
+    "opener:default",
+    "dialog:default",
+    "app:allow-is-dir-empty",
+    "app:allow-close-window",
+    "app:allow-begin-oauth",
+    "app:allow-finish-oauth",
+    "app:allow-open-folder-and-close-window"
+  ]
+}

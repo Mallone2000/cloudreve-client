@@ -18,6 +18,7 @@ reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
 sha2 = "0.10"
 image = "0.24"
 url = "2.5"
+percent-encoding = "2.3"
 cloudreve-api = { path = "../cloudreve-api" }
 chrono = "0.4.42"
 diesel = { version = "2.1", features = ["sqlite", "r2d2"] }
@@ -36,6 +37,7 @@ ctr = "0.9"
 tokio-util = { version = "0.7", features = ["io"] }
 globset = "0.4"
 fs4 = { version = "1", default-features = false }
+libc = "0.2"
 
 [dependencies.uuid]
 version = "1.6"

@@ -232,6 +232,7 @@ impl<'a> UploadTask<'a> {
 
         let params = UploadParams {
             local_path: self.task.payload.local_path.clone(),
+            sync_root: self.sync_path.clone(),
             remote_uri: uri,
             file_size,
             mime_type: None,

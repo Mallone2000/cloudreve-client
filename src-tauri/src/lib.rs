@@ -15,6 +15,35 @@ use tokio::sync::OnceCell;
 use crate::commands::{show_add_drive_window_impl, show_main_window, show_settings_window_impl};
 mod commands;
 mod event_handler;
+mod oauth;
+
+#[cfg(test)]
+mod security_config_tests {
+    #[test]
+    fn desktop_webviews_have_csp_and_no_global_tauri() {
+        let config: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let security = &config["app"]["security"];
+        assert_eq!(config["app"]["withGlobalTauri"], false);
+        assert_eq!(security["csp"]["default-src"], "'self'");
+        assert_eq!(security["csp"]["object-src"], "'none'");
+        assert_eq!(security["assetProtocol"]["scope"]["allow"],
+            serde_json::json!(["$HOME/.cloudreve/icos/**/*"]));
+    }
+
+    #[test]
+    fn oauth_commands_are_only_granted_to_add_drive_window() {
+        let default: serde_json::Value = serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(include_str!("../capabilities/settings.json")).unwrap();
+        let add_drive: serde_json::Value = serde_json::from_str(include_str!("../capabilities/add-drive.json")).unwrap();
+        for other in [&default, &settings] {
+            let permissions = other["permissions"].as_array().unwrap();
+            assert!(!permissions.iter().any(|permission| matches!(permission.as_str(), Some("app:allow-begin-oauth" | "app:allow-finish-oauth"))));
+        }
+        let permissions = add_drive["permissions"].as_array().unwrap();
+        assert!(permissions.iter().any(|permission| permission.as_str() == Some("app:allow-begin-oauth")));
+        assert!(permissions.iter().any(|permission| permission.as_str() == Some("app:allow-finish-oauth")));
+    }
+}
 
 #[macro_use]
 extern crate rust_i18n;
@@ -254,13 +283,14 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             if argv.len() > 1 {
-                let _ = app.emit("deeplink", argv[1].clone());
+                let handle = app.clone();
+                let callback = argv[1].clone();
+                spawn(async move { oauth::handle_callback(handle, callback).await });
                 show_add_drive_window_impl(app);
             }
         }))
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec![])))
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_frame::init())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
@@ -269,6 +299,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_prevent_default::debug())
+        .manage(oauth::OAuthManager::default())
         .setup(|app| {
             #[cfg(desktop)]
             let _ = app.handle().plugin(tauri_plugin_positioner::init());
@@ -296,8 +327,10 @@ pub fn run() {
                 let handle = app.handle().clone();
                 app.deep_link().on_open_url(move |event| {
                     for url in event.urls() {
-                        tracing::info!(target: "main", url = %url, "Deep link received");
-                        let _ = handle.emit("deeplink", url.to_string());
+                        tracing::info!(target: "main", "OAuth deep link received");
+                        let app = handle.clone();
+                        let callback = url.to_string();
+                        spawn(async move { oauth::handle_callback(app, callback).await });
                         show_add_drive_window_impl(&handle);
                     }
                 });
@@ -340,8 +373,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::is_dir_empty,
             commands::list_drives,
-            commands::add_drive,
+            oauth::begin_oauth,
+            oauth::finish_oauth,
             commands::remove_drive,
+            commands::set_insecure_http_consent,
             commands::get_ignore_patterns,
             commands::get_default_ignore_patterns,
             commands::set_ignore_patterns,

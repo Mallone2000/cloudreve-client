@@ -36,6 +36,11 @@ pub struct DriveConfig {
     pub enabled: bool,
     pub user_id: String,
 
+    /// Consent to send credentials and file data to this drive over plain HTTP.
+    /// Old configurations default to false and remain dormant until accepted.
+    #[serde(default)]
+    pub allow_insecure_http: bool,
+
     /// List of gitignore-style patterns for files/directories to ignore during sync
     #[serde(default)]
     pub ignore_patterns: Vec<String>,
@@ -141,6 +146,7 @@ pub struct Mount {
     props_refresh_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     periodic_sync_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     remote_event_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+    sync_tasks: Mutex<Vec<JoinHandle<()>>>,
     manager_command_tx: mpsc::UnboundedSender<ManagerCommand>,
     fs_watcher: Mutex<Option<FsWatcher>>,
     pub(crate) sync_lock: Mutex<()>,
@@ -217,6 +223,8 @@ impl Mount {
             config.remote_path.clone(),
             event_blocker.clone(),
             config.max_file_size_mb,
+            &config.instance_url,
+            config.allow_insecure_http,
             summary_notifier,
             &ignore_matcher,
         ).await;
@@ -231,6 +239,7 @@ impl Mount {
             props_refresh_handle: Arc::new(Mutex::new(None)),
             periodic_sync_handle: Arc::new(Mutex::new(None)),
             remote_event_handle: Arc::new(Mutex::new(None)),
+            sync_tasks: Mutex::new(Vec::new()),
             manager_command_tx,
             fs_watcher: Mutex::new(None),
             sync_lock: Mutex::new(()),
@@ -334,12 +343,14 @@ impl Mount {
             let mount = self.clone();
             match command {
                 MountCommand::Sync { local_paths, mode, user_initiated } => {
-                    spawn(async move {
+                    let mut tasks = self.sync_tasks.lock().await;
+                    tasks.retain(|handle| !handle.is_finished());
+                    tasks.push(spawn(async move {
                         let _lock = mount.sync_lock.lock().await;
                         if let Err(e) = mount.perform_sync(local_paths, mode, user_initiated).await {
                             tracing::error!(target: "drive::mounts", error = %e, "Sync failed");
                         }
-                    });
+                    }));
                 }
                 MountCommand::RefreshCredentials { credentials } => {
                     mount.handle_refresh_credentials(credentials).await;
@@ -356,11 +367,16 @@ impl Mount {
                 }
                 MountCommand::FullSync => {
                     let mount_clone = mount.clone();
-                    spawn(async move {
+                    let mut tasks = self.sync_tasks.lock().await;
+                    tasks.retain(|handle| !handle.is_finished());
+                    tasks.push(spawn(async move {
                         if let Err(e) = mount_clone.re_enqueue_offline_tasks().await {
                             tracing::warn!(target: "drive::mounts", error = %e, "Failed to re-enqueue offline tasks");
                         }
-                        let _lock = mount_clone.sync_lock.lock().await;
+                        let Ok(_lock) = mount_clone.sync_lock.try_lock() else {
+                            tracing::debug!(target: "drive::mounts", id = %mount_clone.id, "Full sync already running; skipping duplicate trigger");
+                            return;
+                        };
                         match mount_clone.perform_full_sync().await {
                             Ok(()) => {
                                 mount_clone.set_initial_sync_completed(true).await;
@@ -369,7 +385,7 @@ impl Mount {
                                 tracing::error!(target: "drive::mounts", error = %e, "Full sync failed");
                             }
                         }
-                    });
+                    }));
                 }
             }
         }
@@ -497,6 +513,7 @@ impl Mount {
     async fn replace_worker(slot: &Mutex<Option<JoinHandle<()>>>, new: JoinHandle<()>) {
         if let Some(previous) = slot.lock().await.replace(new) {
             previous.abort();
+            let _ = previous.await;
         }
     }
 
@@ -625,15 +642,9 @@ impl Mount {
         *self.fs_watcher.lock().await = None;
 
         // Abort background handles (but NOT the command processor)
-        if let Some(h) = self.remote_event_handle.lock().await.take() {
-            h.abort();
-        }
-        if let Some(h) = self.periodic_sync_handle.lock().await.take() {
-            h.abort();
-        }
-        if let Some(h) = self.props_refresh_handle.lock().await.take() {
-            h.abort();
-        }
+        self.abort_background_tasks(false).await;
+
+        self.abort_sync_tasks().await;
 
         // Cancel all running/pending tasks
         self.task_queue.cancel_all().await;
@@ -648,23 +659,43 @@ impl Mount {
 
     pub async fn shutdown(&self) {
         tracing::info!(target: "drive::mounts", id = %self.id, "Shutting down mount");
+        self.paused.store(true, std::sync::atomic::Ordering::Relaxed);
 
         // Stop fs watcher
         *self.fs_watcher.lock().await = None;
 
-        // Abort background tasks
-        if let Some(h) = self.processor_handle.lock().await.take() {
-            h.abort();
-        }
-        if let Some(h) = self.remote_event_handle.lock().await.take() {
-            h.abort();
-        }
-        if let Some(h) = self.props_refresh_handle.lock().await.take() {
-            h.abort();
-        }
+        self.abort_background_tasks(true).await;
+
+        self.abort_sync_tasks().await;
 
         // Shutdown task queue
         self.task_queue.shutdown().await;
+    }
+
+    async fn abort_sync_tasks(&self) {
+        let handles: Vec<_> = self.sync_tasks.lock().await.drain(..).collect();
+        for handle in &handles { handle.abort(); }
+        for handle in handles { let _ = handle.await; }
+    }
+
+    async fn abort_background_tasks(&self, include_processor: bool) {
+        let mut handles = Vec::new();
+        if include_processor {
+            if let Some(handle) = self.processor_handle.lock().await.take() {
+                handles.push(handle);
+            }
+        }
+        if let Some(handle) = self.remote_event_handle.lock().await.take() {
+            handles.push(handle);
+        }
+        if let Some(handle) = self.periodic_sync_handle.lock().await.take() {
+            handles.push(handle);
+        }
+        if let Some(handle) = self.props_refresh_handle.lock().await.take() {
+            handles.push(handle);
+        }
+        for handle in &handles { handle.abort(); }
+        for handle in handles { let _ = handle.await; }
     }
 
     pub async fn delete(&self) -> Result<()> {

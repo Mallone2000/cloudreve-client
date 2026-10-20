@@ -14,12 +14,14 @@ use dirs::home_dir;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations/inventory");
 
 /// SQLite-backed inventory database that relies on Diesel for schema management.
 pub struct InventoryDb {
     pool: Arc<Pool<ConnectionManager<SqliteConnection>>>,
+    connection_checkouts: AtomicU64,
 }
 
 impl InventoryDb {
@@ -56,7 +58,13 @@ impl InventoryDb {
 
         Ok(Self {
             pool: Arc::new(pool),
+            connection_checkouts: AtomicU64::new(0),
         })
+    }
+
+    /// Number of SQLite connection acquisitions, for reconciliation profiling.
+    pub fn connection_checkouts(&self) -> u64 {
+        self.connection_checkouts.load(Ordering::Relaxed)
     }
 
     fn get_db_path() -> Result<PathBuf> {
@@ -67,9 +75,11 @@ impl InventoryDb {
     pub(crate) fn connection(
         &self,
     ) -> Result<PooledConnection<ConnectionManager<SqliteConnection>>> {
-        self.pool
+        let connection = self.pool
             .get()
-            .context("Failed to get connection from inventory pool")
+            .context("Failed to get connection from inventory pool")?;
+        self.connection_checkouts.fetch_add(1, Ordering::Relaxed);
+        Ok(connection)
     }
 }
 

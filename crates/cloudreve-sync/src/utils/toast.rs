@@ -14,6 +14,8 @@ static OS_NOTIFIER: OnceLock<UnboundedSender<(String, String)>> = OnceLock::new(
 /// rate-limited per drive rather than repeated hundreds of times.
 static LOW_DISK_THROTTLE: LazyLock<Throttle> =
     LazyLock::new(|| Throttle::new(Duration::from_secs(3600)));
+static SYMLINK_THROTTLE: LazyLock<Throttle> =
+    LazyLock::new(|| Throttle::new(Duration::from_secs(3600)));
 
 /// Rate limiter keyed by an arbitrary string (a drive id, in practice).
 /// Keeps a bulk operation from producing one notification per file.
@@ -67,6 +69,16 @@ pub fn send_general_text_toast(title: &str, message: &str) {
 pub fn send_warning_toast(title: &str, message: &str) {
     tracing::warn!(target: "toast", title = title, message = message, "Warning notification");
     push_notification(title, message);
+}
+
+pub fn send_skipped_symlink_toast(root: &std::path::Path, path: &std::path::Path) {
+    let key = root.to_string_lossy();
+    if SYMLINK_THROTTLE.allow(&key) {
+        push_notification(
+            "Symlink skipped",
+            format!("Sync skipped {} because it is a symlink. Other symlinks under this drive are also skipped.", path.display()),
+        );
+    }
 }
 
 /// Send a token expiry notification.

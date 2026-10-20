@@ -760,6 +760,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "chrono",
+ "futures-util",
  "percent-encoding",
  "reqwest 0.12.28",
  "serde",
@@ -782,9 +783,11 @@ dependencies = [
  "cloudreve-api",
  "cloudreve-sync",
  "log",
+ "reqwest 0.12.28",
  "rust-i18n",
  "serde",
  "serde_json",
+ "sha2",
  "showfile",
  "sys-locale",
  "tauri",
@@ -793,7 +796,6 @@ dependencies = [
  "tauri-plugin-deep-link",
  "tauri-plugin-dialog",
  "tauri-plugin-frame",
- "tauri-plugin-http",
  "tauri-plugin-log",
  "tauri-plugin-notification",
  "tauri-plugin-opener",
@@ -805,6 +807,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tokio",
  "tracing",
+ "url",
  "urlencoding",
  "uuid",
 ]
@@ -830,9 +833,11 @@ dependencies = [
  "futures",
  "globset",
  "image",
+ "libc",
  "libsqlite3-sys",
  "notify-debouncer-full",
  "open",
+ "percent-encoding",
  "reqwest 0.12.28",
  "rust-i18n",
  "serde",
@@ -1186,12 +1191,6 @@ dependencies = [
  "once_cell",
  "parking_lot_core",
 ]
-
-[[package]]
-name = "data-url"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
 name = "dbus"
@@ -5914,30 +5913,6 @@ dependencies = [
  "thiserror 2.0.18",
  "toml 0.9.12+spec-1.1.0",
  "url",
-]
-
-[[package]]
-name = "tauri-plugin-http"
-version = "2.5.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfba7d4ec72763f9d1fdf73c217747f01e2c84b08b87a8cacd2f94f35853f84d"
-dependencies = [
- "bytes",
- "cookie_store",
- "data-url",
- "http",
- "regex",
- "reqwest 0.12.28",
- "schemars 0.8.22",
- "serde",
- "serde_json",
- "tauri",
- "tauri-plugin",
- "tauri-plugin-fs",
- "thiserror 2.0.18",
- "tokio",
- "url",
- "urlpattern",
 ]
 
 [[package]]

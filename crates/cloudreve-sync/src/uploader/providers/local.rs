@@ -84,7 +84,6 @@ where
         target: "uploader::remote",
         chunk = chunk.index,
         size = chunk.size,
-        url = %url,
         "Uploading chunk to slave node (streaming)"
     );
 

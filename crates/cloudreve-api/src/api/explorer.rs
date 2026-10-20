@@ -1,4 +1,4 @@
-use crate::client::{Client, RequestOptions, CR_HEADER_PREFIX};
+use crate::client::{capped_response_json, Client, RequestOptions, CR_HEADER_PREFIX};
 use crate::error::ApiResult;
 use crate::models::common::ListAllRes;
 use crate::models::explorer::*;
@@ -518,7 +518,7 @@ impl ExplorerApi for Client {
             .send()
             .await?;
 
-        let api_response: crate::error::ApiResponse<FileResponse> = response.json().await?;
+        let api_response: crate::error::ApiResponse<FileResponse> = crate::client::capped_response_json(response).await?;
 
         if api_response.code != 0 {
             return Err(crate::error::ApiError::from_response(api_response));
@@ -588,7 +588,7 @@ impl ExplorerApi for Client {
             .send()
             .await?;
 
-        let api_response: crate::error::ApiResponse<UploadCredential> = response.json().await?;
+        let api_response: crate::error::ApiResponse<UploadCredential> = crate::client::capped_response_json(response).await?;
 
         if api_response.code != 0 {
             return Err(crate::error::ApiError::from_response(api_response));
@@ -617,7 +617,7 @@ impl ExplorerApi for Client {
             .send()
             .await?;
 
-        let api_response: crate::error::ApiResponse<()> = response.json().await?;
+        let api_response: crate::error::ApiResponse<()> = crate::client::capped_response_json(response).await?;
 
         if api_response.code != 0 {
             return Err(crate::error::ApiError::from_response(api_response));
@@ -848,26 +848,21 @@ impl FileEventsApi for Client {
             // Successfully upgraded to SSE
             Ok(FileEventSubscription::new(response))
         } else {
-            // Server returned a regular response (likely an error)
-            // Try to parse it as an API error response
-            let response_text = response.text().await?;
-
-            // Try to parse as API response
-            if let Ok(api_response) =
-                serde_json::from_str::<crate::error::ApiResponse<()>>(&response_text)
-            {
-                if api_response.code != 0 {
-                    return Err(crate::error::ApiError::SseNotUpgraded {
-                        code: api_response.code,
-                        message: api_response.msg,
-                    });
-                }
+            // Server returned a regular response (likely an error). Apply the
+            // same body cap as other API calls and do not echo its body.
+            let api_response: crate::error::ApiResponse<serde_json::Value> =
+                capped_response_json(response).await?;
+            if api_response.code != 0 {
+                return Err(crate::error::ApiError::SseNotUpgraded {
+                    code: api_response.code,
+                    message: api_response.msg,
+                });
             }
 
-            // If we couldn't parse it, return a generic error
+            // A successful JSON response still did not upgrade to SSE.
             Err(crate::error::ApiError::SseNotUpgraded {
                 code: -1,
-                message: format!("Unexpected response: {}", response_text),
+                message: "Site did not start an event stream".into(),
             })
         }
     }

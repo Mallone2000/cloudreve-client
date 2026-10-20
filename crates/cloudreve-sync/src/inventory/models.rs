@@ -9,6 +9,8 @@ use uuid::Uuid;
 pub enum ConflictState {
     /// File has a conflict, pending user action
     Pending,
+    /// Initial local/remote collision is awaiting a byte comparison.
+    Verifying,
     /// User chose to override the remote version
     Override,
 }
@@ -17,6 +19,7 @@ impl ConflictState {
     pub fn as_str(&self) -> &'static str {
         match self {
             ConflictState::Pending => "pending",
+            ConflictState::Verifying => "verifying",
             ConflictState::Override => "override",
         }
     }
@@ -24,6 +27,7 @@ impl ConflictState {
     pub fn from_str(value: &str) -> Option<Self> {
         match value {
             "pending" => Some(ConflictState::Pending),
+            "verifying" => Some(ConflictState::Verifying),
             "override" => Some(ConflictState::Override),
             _ => None,
         }

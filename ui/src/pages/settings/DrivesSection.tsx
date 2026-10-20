@@ -203,6 +203,8 @@ export default function DrivesSection() {
         return "#ff9800"; // orange
       case "credential_expired":
         return "#f44336"; // red
+      case "transport_consent_required":
+        return "#f44336";
       default:
         return "#9e9e9e"; // grey
     }
@@ -223,6 +225,8 @@ export default function DrivesSection() {
         return t("settings.driveStatus.offline");
       case "credential_expired":
         return t("settings.driveStatus.credentialExpired");
+      case "transport_consent_required":
+        return "HTTP consent required";
       default:
         return status;
     }
@@ -427,6 +431,42 @@ export default function DrivesSection() {
                       onClick={() => handleReauthorize(drive)}
                     >
                       {t("settings.reauthorize")}
+                    </SecondaryButton>
+                  )}
+
+                  {drive.status === "transport_consent_required" && (
+                    <SecondaryButton
+                      size="small"
+                      onClick={async () => {
+                        const accepted = await ask(
+                          "This Cloudreve site uses HTTP. Your credentials and files can be read or changed on the network. Allow this drive to connect?",
+                          { title: "Allow insecure HTTP", kind: "warning" },
+                        );
+                        if (accepted) {
+                          await invoke("set_insecure_http_consent", { driveId: drive.id, allow: true });
+                          await fetchDrives();
+                        }
+                      }}
+                    >
+                      Allow HTTP
+                    </SecondaryButton>
+                  )}
+
+                  {drive.instance_url.toLowerCase().startsWith("http://") && drive.status !== "transport_consent_required" && (
+                    <SecondaryButton
+                      size="small"
+                      onClick={async () => {
+                        const confirmed = await ask(
+                          "Pause this HTTP drive and revoke its network consent? Pending transfers will stop.",
+                          { title: "Revoke HTTP consent", kind: "warning" },
+                        );
+                        if (confirmed) {
+                          await invoke("set_insecure_http_consent", { driveId: drive.id, allow: false });
+                          await fetchDrives();
+                        }
+                      }}
+                    >
+                      Revoke HTTP
                     </SecondaryButton>
                   )}
 

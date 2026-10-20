@@ -52,7 +52,6 @@ where
     debug!(
         target: "uploader::upyun",
         size = chunk.size,
-        url = %url,
         "Uploading file to Upyun (streaming)"
     );
 

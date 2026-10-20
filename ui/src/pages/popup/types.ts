@@ -4,11 +4,13 @@ export interface DriveConfig {
   instance_url: string;
   sync_path: string;
   icon_path?: string;
+  transport_consent_required: boolean;
+  allow_insecure_http: boolean;
 }
 
 export interface TaskProgress {
   task_id: string;
-  kind: "Upload" | "Download";
+  kind: "Upload" | "Download" | "VerifyCollision";
   local_path: string;
   progress: number;
   processed_bytes?: number;
@@ -55,10 +57,4 @@ export interface StatusSummary {
   has_ever_synced?: boolean;
   conflicts: ConflictInfo[];
   paused_drives: string[];
-}
-
-export interface FileIconResponse {
-  data: string; // Base64 encoded RGBA pixel data
-  width: number;
-  height: number;
 }

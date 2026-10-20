@@ -11,6 +11,25 @@ use uuid::Uuid;
 use crate::inventory::schema::file_metadata::{self, dsl as file_metadata_dsl};
 
 impl InventoryDb {
+    /// Persist a reconciliation batch in one SQLite transaction and checkout.
+    pub fn batch_upsert(&self, entries: &[MetadataEntry]) -> Result<()> {
+        if entries.is_empty() { return Ok(()); }
+        let mut conn = self.connection()?;
+        (&mut *conn).transaction::<_, anyhow::Error, _>(|conn| {
+            for entry in entries {
+                let insert_data = NewFileMetadata::try_from(entry)?;
+                let update_data = FileMetadataChangeset::from_entry(entry)?;
+                diesel::insert_into(file_metadata::table)
+                    .values(&insert_data)
+                    .on_conflict(file_metadata::local_path)
+                    .do_update()
+                    .set(update_data)
+                    .execute(conn)?;
+            }
+            Ok(())
+        })
+    }
+
     pub fn batch_insert(&self, entries: &[MetadataEntry]) -> Result<()> {
         if entries.is_empty() {
             return Ok(());

@@ -8,11 +8,50 @@ pub struct DriveState {
     pub drives: Vec<DriveConfig>,
 }
 
+/// Explicitly whitelisted fields safe to send to a WebView.
+#[derive(Debug, Clone, Serialize)]
+pub struct DriveSummary {
+    pub id: String,
+    pub name: String,
+    pub instance_url: String,
+    pub remote_path: String,
+    pub sync_path: std::path::PathBuf,
+    pub icon_path: Option<String>,
+    pub raw_icon_path: Option<String>,
+    pub enabled: bool,
+    pub user_id: String,
+    pub ignore_patterns: Vec<String>,
+    pub max_file_size_mb: u64,
+    pub allow_insecure_http: bool,
+    pub transport_consent_required: bool,
+}
+
+impl From<&DriveConfig> for DriveSummary {
+    fn from(config: &DriveConfig) -> Self {
+        Self {
+            id: config.id.clone(),
+            name: config.name.clone(),
+            instance_url: config.instance_url.clone(),
+            remote_path: config.remote_path.clone(),
+            sync_path: config.sync_path.clone(),
+            icon_path: config.icon_path.clone(),
+            raw_icon_path: config.raw_icon_path.clone(),
+            enabled: config.enabled,
+            user_id: config.user_id.clone(),
+            ignore_patterns: config.ignore_patterns.clone(),
+            max_file_size_mb: config.max_file_size_mb,
+            allow_insecure_http: config.allow_insecure_http,
+            transport_consent_required: url::Url::parse(&config.instance_url)
+                .is_ok_and(|url| url.scheme() == "http") && !config.allow_insecure_http,
+        }
+    }
+}
+
 /// Summary of the current status including drives and recent tasks
 #[derive(Debug, Clone, Serialize)]
 pub struct StatusSummary {
-    /// All configured drives (unfiltered)
-    pub drives: Vec<DriveConfig>,
+    /// All configured drives, without credentials (unfiltered).
+    pub drives: Vec<DriveSummary>,
     /// Active tasks (pending/running) with optional live progress info
     pub active_tasks: Vec<TaskWithProgress>,
     /// Recently finished tasks (completed/failed/cancelled)
@@ -23,6 +62,49 @@ pub struct StatusSummary {
     pub conflicts: Vec<ConflictInfo>,
     /// Drive IDs that are currently paused
     pub paused_drives: Vec<String>,
+}
+
+#[cfg(test)]
+mod summary_tests {
+    use super::*;
+
+    #[test]
+    fn ui_summary_never_serializes_credentials() {
+        let config = DriveConfig {
+            id: "drive-1".into(),
+            credentials: crate::drive::mounts::Credentials {
+                access_token: Some("ACCESS_SENTINEL".into()),
+                refresh_token: "REFRESH_SENTINEL".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&DriveSummary::from(&config)).unwrap();
+        assert!(!json.contains("ACCESS_SENTINEL"));
+        assert!(!json.contains("REFRESH_SENTINEL"));
+        assert!(!json.contains("credentials"));
+        let status = StatusSummary {
+            drives: vec![DriveSummary::from(&config)],
+            active_tasks: vec![], finished_tasks: vec![],
+            has_ever_synced: false, conflicts: vec![], paused_drives: vec![],
+        };
+        let status_json = serde_json::to_string(&status).unwrap();
+        assert!(!status_json.contains("ACCESS_SENTINEL"));
+        assert!(!status_json.contains("REFRESH_SENTINEL"));
+    }
+
+    #[test]
+    fn old_http_config_requires_consent_after_deserialization() {
+        let mut serialized = serde_json::to_value(DriveConfig {
+            instance_url: "http://cloud.example".into(),
+            ..Default::default()
+        }).unwrap();
+        serialized.as_object_mut().unwrap().remove("allow_insecure_http");
+        let config: DriveConfig = serde_json::from_value(serialized).unwrap();
+        let summary = DriveSummary::from(&config);
+        assert!(!summary.allow_insecure_http);
+        assert!(summary.transport_consent_required);
+    }
 }
 
 /// A file conflict awaiting user resolution
@@ -150,6 +232,8 @@ pub enum DriveInfoStatus {
     CredentialExpired,
     /// Network connection is offline
     Offline,
+    /// Existing HTTP drive is dormant until the user explicitly accepts it.
+    TransportConsentRequired,
 }
 
 /// Format bytes into a human-readable string (e.g., "1.5 GB")

@@ -140,6 +140,10 @@ export default function Popup() {
 
   const handleTogglePause = async () => {
     try {
+      if (selectedDrive && summary?.drives.find((drive) => drive.id === selectedDrive)?.transport_consent_required) {
+        await handleSettings();
+        return;
+      }
       if (selectedDrive) {
         // Pause/resume a single drive
         await invoke(isPaused ? "resume_sync" : "pause_sync", { driveId: selectedDrive });
@@ -147,6 +151,7 @@ export default function Popup() {
         // Pause/resume all drives
         const drives = summary?.drives ?? [];
         for (const drive of drives) {
+          if (drive.transport_consent_required) continue;
           await invoke(isPaused ? "resume_sync" : "pause_sync", { driveId: drive.id });
         }
       }
@@ -201,7 +206,9 @@ export default function Popup() {
               <IconButton
                 size="small"
                 onClick={handleTogglePause}
-                title={isPaused
+                title={selectedDrive && summary?.drives.find((drive) => drive.id === selectedDrive)?.transport_consent_required
+                  ? "HTTP consent required in Settings"
+                  : isPaused
                   ? t("popup.resume", "Resume sync")
                   : t("popup.pause", "Pause sync")}
               >

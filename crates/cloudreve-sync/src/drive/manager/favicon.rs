@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use futures::StreamExt;
+use std::{io::Write, path::PathBuf};
 
 /// Manifest.json structure
 #[derive(Debug, Deserialize)]
@@ -38,14 +39,31 @@ enum IconType {
 /// Get the icons directory path
 fn get_icons_dir() -> Result<PathBuf> {
     let home_dir = dirs::home_dir().context("Failed to get user home directory")?;
-    let icons_dir = home_dir.join(".cloudreve").join("icos");
+    let app_dir = home_dir.join(".cloudreve");
+    let icons_dir = app_dir.join("icos");
 
-    // Ensure icons directory exists
-    if !icons_dir.exists() {
-        std::fs::create_dir_all(&icons_dir).context("Failed to create icons directory")?;
+    for directory in [&app_dir, &icons_dir] {
+        match std::fs::symlink_metadata(directory) {
+            Ok(meta) if !meta.is_dir() || meta.file_type().is_symlink() => {
+                anyhow::bail!("Icon cache directory is not a real directory");
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(directory).context("Failed to create icons directory")?;
+            }
+            Err(error) => return Err(error).context("Failed to inspect icons directory"),
+        }
     }
 
     Ok(icons_dir)
+}
+
+pub(super) fn cached_icon_is_safe(path: &str) -> bool {
+    let Ok(cache_dir) = get_icons_dir() else { return false; };
+    let path = std::path::Path::new(path);
+    path.parent() == Some(cache_dir.as_path())
+        && std::fs::symlink_metadata(path)
+            .is_ok_and(|meta| meta.is_file() && !meta.file_type().is_symlink())
 }
 
 /// Parse icon size from sizes string (e.g., "192x192" or "64x64 32x32")
@@ -58,18 +76,13 @@ fn parse_icon_size(sizes: &str) -> Option<u32> {
 }
 
 /// Build full URL from icon src and base instance URL
-fn build_icon_url(icon: &ManifestIcon, instance_url: &str) -> String {
-    if icon.src.starts_with("http") {
-        icon.src.clone()
-    } else {
-        let base = instance_url.trim_end_matches('/');
-        let path = icon.src.trim_start_matches('/');
-        if icon.src.starts_with('/') {
-            format!("{}{}", base, icon.src)
-        } else {
-            format!("{}/{}", base, path)
-        }
+fn build_icon_url(icon: &ManifestIcon, instance_url: &str) -> Result<String> {
+    let base = url::Url::parse(instance_url)?;
+    let url = base.join(&icon.src)?;
+    if url.origin() != base.origin() {
+        anyhow::bail!("Manifest icon points outside the Cloudreve site");
     }
+    Ok(url.to_string())
 }
 
 /// Determine file extension from icon type and URL
@@ -98,22 +111,34 @@ fn is_ico_format(icon: &ManifestIcon, url: &str) -> bool {
 
 /// Download an icon from URL
 async fn download_icon(client: &reqwest::Client, url: &str) -> Result<bytes::Bytes> {
-    tracing::debug!(target: "drive::favicon", icon_url = %url, "Downloading icon");
     let response = client
         .get(url)
         .send()
         .await
-        .context("Failed to download icon")?;
+        .map_err(reqwest::Error::without_url).context("Failed to download icon")?;
 
     let status = response.status();
     if !status.is_success() {
         anyhow::bail!("Failed to download icon: HTTP {}", status);
     }
 
-    response
-        .bytes()
-        .await
-        .context("Failed to read icon bytes")
+    read_limited(response, 2 * 1024 * 1024).await
+}
+
+async fn read_limited(response: reqwest::Response, limit: usize) -> Result<bytes::Bytes> {
+    if response.content_length().is_some_and(|size| size > limit as u64) {
+        anyhow::bail!("Remote image or manifest is too large");
+    }
+    let mut body = bytes::BytesMut::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(reqwest::Error::without_url).context("Failed to read remote image")?;
+        if chunk.len() > limit.saturating_sub(body.len()) {
+            anyhow::bail!("Remote image or manifest is too large");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body.freeze())
 }
 
 /// Get fallback icon bytes for the given icon type
@@ -123,17 +148,25 @@ fn get_fallback_icon(_icon_type: IconType) -> Result<Vec<u8>> {
 
 /// Save icon bytes to destination, converting to ICO if needed
 fn save_icon(bytes: &[u8], dest_path: &PathBuf, convert_to_ico: bool, is_already_ico: bool) -> Result<()> {
-    if convert_to_ico && !is_already_ico {
+    let output = if convert_to_ico && !is_already_ico {
         // Convert image to ICO format
         let img = image::load_from_memory(bytes).context("Failed to load image")?;
         // Resize to 64x64 for ICO
         let resized = img.resize(64, 64, image::imageops::FilterType::Lanczos3);
-        resized
-            .save_with_format(dest_path, image::ImageFormat::Ico)
-            .context("Failed to save as ICO")?;
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        resized.write_to(&mut encoded, image::ImageOutputFormat::Ico)
+            .context("Failed to encode ICO")?;
+        encoded.into_inner()
     } else {
-        std::fs::write(dest_path, bytes).context("Failed to save icon file")?;
-    }
+        bytes.to_vec()
+    };
+    // A rename replaces an existing symlink instead of writing through it.
+    let temp_path = dest_path.with_file_name(format!(".icon-{}", uuid::Uuid::new_v4()));
+    let mut temp = std::fs::OpenOptions::new().write(true).create_new(true)
+        .open(&temp_path).context("Failed to create icon cache file")?;
+    temp.write_all(&output).context("Failed to write icon cache file")?;
+    drop(temp);
+    std::fs::rename(&temp_path, dest_path).context("Failed to install icon cache file")?;
     Ok(())
 }
 
@@ -143,7 +176,7 @@ fn save_icon(bytes: &[u8], dest_path: &PathBuf, convert_to_ico: bool, is_already
 /// For raw: downloads the largest icon for status UI display
 /// Falls back to bundled icons if download fails
 pub async fn fetch_and_save_favicon(instance_url: &str) -> Result<FaviconResult> {
-    tracing::info!(target: "drive::favicon", instance_url = %instance_url, "Fetching favicon");
+    tracing::info!(target: "drive::favicon", "Fetching favicon");
 
     // Parse the URL to get hostname and port
     let parsed_url = url::Url::parse(instance_url).context("Failed to parse instance URL")?;
@@ -192,24 +225,46 @@ pub async fn fetch_and_save_favicon(instance_url: &str) -> Result<FaviconResult>
     })
 }
 
+#[cfg(all(test, unix))]
+mod file_safety_tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn icon_install_replaces_symlink_without_writing_through_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("outside.txt");
+        std::fs::write(&outside, b"keep").unwrap();
+        let cache = temp.path().join("icon.png");
+        symlink(&outside, &cache).unwrap();
+        save_icon(b"new icon", &cache, false, false).unwrap();
+        assert_eq!(std::fs::read(&outside).unwrap(), b"keep");
+        assert_eq!(std::fs::read(&cache).unwrap(), b"new icon");
+        assert!(!std::fs::symlink_metadata(&cache).unwrap().file_type().is_symlink());
+    }
+}
+
 /// Fetch icons from remote server
 async fn fetch_icons_from_remote(instance_url: &str, icons_dir: &PathBuf, hash: &str) -> Result<FaviconResult> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .context("Failed to create HTTP client")?;
 
     // Fetch manifest.json
     let manifest_url = format!("{}/manifest.json", instance_url.trim_end_matches('/'));
-    tracing::debug!(target: "drive::favicon", manifest_url = %manifest_url, "Fetching manifest.json");
+    tracing::debug!(target: "drive::favicon", "Fetching manifest.json");
 
-    let manifest: Manifest = client
+    let manifest_response = client
         .get(&manifest_url)
         .send()
         .await
-        .context("Failed to fetch manifest.json")?
-        .json()
-        .await
+        .context("Failed to fetch manifest.json")?;
+    if !manifest_response.status().is_success() {
+        anyhow::bail!("Manifest request failed: HTTP {}", manifest_response.status());
+    }
+    let manifest: Manifest = serde_json::from_slice(&read_limited(manifest_response, 1024 * 1024).await?)
         .context("Failed to parse manifest.json")?;
 
     // Find the smallest icon for ICO (Windows shell integration)
@@ -230,11 +285,11 @@ async fn fetch_icons_from_remote(instance_url: &str, icons_dir: &PathBuf, hash: 
         .map(|(_, icon)| icon)
         .unwrap_or(smallest_icon);
 
-    tracing::debug!(target: "drive::favicon", smallest_src = %smallest_icon.src, smallest_sizes = %smallest_icon.sizes, "Selected smallest icon for ICO");
-    tracing::debug!(target: "drive::favicon", largest_src = %largest_icon.src, largest_sizes = %largest_icon.sizes, "Selected largest icon for raw");
+    tracing::debug!(target: "drive::favicon", smallest_sizes = %smallest_icon.sizes, "Selected smallest icon for ICO");
+    tracing::debug!(target: "drive::favicon", largest_sizes = %largest_icon.sizes, "Selected largest icon for raw");
 
-    let smallest_icon_url = build_icon_url(smallest_icon, instance_url);
-    let largest_icon_url = build_icon_url(largest_icon, instance_url);
+    let smallest_icon_url = build_icon_url(smallest_icon, instance_url)?;
+    let largest_icon_url = build_icon_url(largest_icon, instance_url)?;
     let same_icon = largest_icon.src == smallest_icon.src;
 
     // Download smallest icon for ICO, with fallback
@@ -270,7 +325,7 @@ async fn fetch_icons_from_remote(instance_url: &str, icons_dir: &PathBuf, hash: 
     tracing::debug!(target: "drive::favicon", path = %ico_path.display(), "ICO saved");
 
     // Save large icon as raw
-    std::fs::write(&raw_path, &large_bytes).context("Failed to save raw icon file")?;
+    save_icon(&large_bytes, &raw_path, false, false)?;
     tracing::debug!(target: "drive::favicon", path = %raw_path.display(), "Raw icon saved");
 
     tracing::info!(target: "drive::favicon", ico_path = %ico_path.display(), raw_path = %raw_path.display(), "Favicon saved successfully");

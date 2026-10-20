@@ -2,7 +2,7 @@ use crate::AppStateHandle;
 use chrono::{Duration, Utc};
 use cloudreve_api::api::UserApi;
 use cloudreve_sync::{
-    config::LogLevel, ConfigManager, ConflictResolution, Credentials, DriveConfig, DriveInfo,
+    config::LogLevel, ConfigManager, ConflictResolution, Credentials, DriveConfig, DriveInfo, DriveSummary,
     StatusSummary,
 };
 #[cfg(target_os = "macos")]
@@ -81,7 +81,7 @@ pub async fn is_dir_empty(path: String) -> CommandResult<bool> {
 }
 
 #[tauri::command]
-pub async fn list_drives(state: State<'_, AppStateHandle>) -> CommandResult<Vec<DriveConfig>> {
+pub async fn list_drives(state: State<'_, AppStateHandle>) -> CommandResult<Vec<DriveSummary>> {
     let app_state = state.get().ok_or_else(|| "App not yet initialized".to_string())?;
     Ok(app_state.drive_manager.list_drives().await)
 }
@@ -98,15 +98,14 @@ pub struct AddDriveArgs {
     pub local_path: String,
     pub user_id: String,
     pub drive_id: Option<String>,
+    #[serde(default)]
+    pub allow_insecure_http: bool,
 }
 
-#[tauri::command]
-pub async fn add_drive(
-    state: State<'_, AppStateHandle>,
+pub(crate) async fn add_drive_with_tokens(
+    app_state: &crate::AppState,
     config: AddDriveArgs,
 ) -> CommandResult<String> {
-    let app_state = state.get().ok_or_else(|| "App not yet initialized".to_string())?;
-
     if config.drive_id.is_none() && is_root_drive(&config.local_path) {
         return Err(t!("localPathCannotBeRootDrive").to_string());
     }
@@ -124,7 +123,7 @@ pub async fn add_drive(
 
     if let Some(drive_id) = config.drive_id {
         app_state.drive_manager
-            .update_drive_credentials(&drive_id, config.drive_name, config.site_url, credentials, &config.user_id)
+            .update_drive_credentials(&drive_id, config.drive_name, config.site_url, credentials, &config.user_id, config.allow_insecure_http)
             .await
             .map_err(|e| e.to_string())?;
         app_state.drive_manager.persist().await.map_err(|e| e.to_string())?;
@@ -144,6 +143,7 @@ pub async fn add_drive(
         raw_icon_path: None,
         enabled: true,
         user_id: config.user_id,
+        allow_insecure_http: config.allow_insecure_http,
         ignore_patterns: Vec::new(),
         max_file_size_mb: 3072,
         sse_client_id,
@@ -159,11 +159,22 @@ pub async fn add_drive(
 pub async fn remove_drive(
     state: State<'_, AppStateHandle>,
     drive_id: String,
-) -> CommandResult<Option<DriveConfig>> {
+) -> CommandResult<bool> {
     let app_state = state.get().ok_or_else(|| "App not yet initialized".to_string())?;
     let result = app_state.drive_manager.remove_drive(&drive_id).await.map_err(|e| e.to_string())?;
     app_state.drive_manager.persist().await.map_err(|e| e.to_string())?;
     Ok(result)
+}
+
+#[tauri::command]
+pub async fn set_insecure_http_consent(
+    state: State<'_, AppStateHandle>,
+    drive_id: String,
+    allow: bool,
+) -> CommandResult<()> {
+    let app_state = state.get().ok_or_else(|| "App not yet initialized".to_string())?;
+    app_state.drive_manager.set_insecure_http_consent(&drive_id, allow).await.map_err(|e| e.to_string())?;
+    app_state.drive_manager.persist().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]

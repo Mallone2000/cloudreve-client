@@ -5,6 +5,7 @@ use crate::inventory::{InventoryDb, NewTaskRecord, TaskRecord, TaskStatus, TaskU
 use crate::tasks::download::DownloadTask;
 use crate::tasks::types::{TaskKind, TaskPayload, TaskProgress};
 use crate::tasks::upload::UploadTask;
+use crate::tasks::verify_collision;
 use anyhow::{Context, Result, anyhow};
 use cloudreve_api::Client;
 use dashmap::DashMap;
@@ -57,6 +58,8 @@ pub struct TaskQueue {
     pub remote_base: String,
     pub event_blocker: EventBlocker,
     pub max_file_size_mb: u64,
+    download_client: Arc<reqwest::Client>,
+    approved_http_origin: Option<url::Url>,
     config: TaskQueueConfig,
     semaphore: Arc<Semaphore>,
     command_tx: UnboundedSender<QueueCommand>,
@@ -82,6 +85,8 @@ impl TaskQueue {
         remote_base: String,
         event_blocker: EventBlocker,
         max_file_size_mb: u64,
+        instance_url: &str,
+        allow_insecure_http: bool,
         notifier: Arc<SummaryNotifier>,
         ignore: &IgnoreMatcher,
     ) -> Arc<Self> {
@@ -90,6 +95,29 @@ impl TaskQueue {
         let sanitized_config = TaskQueueConfig { max_concurrent };
 
         let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let approved_http_origin = if allow_insecure_http {
+            url::Url::parse(instance_url).ok().filter(|url| url.scheme() == "http")
+        } else {
+            None
+        };
+        let redirect_origin = approved_http_origin.clone();
+        let download_client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .read_timeout(std::time::Duration::from_secs(60))
+            .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                if attempt.previous().len() >= 10 {
+                    return attempt.stop();
+                }
+                if attempt.previous().first().is_some_and(|initial| {
+                    crate::tasks::download::allowed_download_redirect(initial, attempt.url(), &redirect_origin)
+                }) {
+                    attempt.follow()
+                } else {
+                    attempt.stop()
+                }
+            }))
+            .build()
+            .expect("Failed to create download HTTP client");
         let queue = Arc::new(Self {
             drive_id,
             inventory,
@@ -98,6 +126,8 @@ impl TaskQueue {
             remote_base,
             event_blocker,
             max_file_size_mb,
+            download_client: Arc::new(download_client),
+            approved_http_origin,
             config: sanitized_config,
             semaphore: Arc::new(Semaphore::new(max_concurrent)),
             command_tx,
@@ -136,6 +166,8 @@ impl TaskQueue {
         if self.shutting_down.load(Ordering::SeqCst) {
             return Err(anyhow!("task queue is shutting down"));
         }
+        crate::drive::utils::SafeSyncPath::from_local(&payload.local_path, &self.sync_path)?
+            .join_checked(&self.sync_path)?;
 
         // A download that permanently failed for this exact remote version
         // (same etag) will fail again: don't re-enqueue it on every sync.
@@ -148,11 +180,13 @@ impl TaskQueue {
                 .and_then(|s| s.get("remote_etag"))
                 .and_then(|v| v.as_str())
             {
-                let latest = self.inventory.latest_task_for_path(
-                    &self.drive_id,
-                    payload.kind.as_str(),
-                    &payload.local_path_display(),
-                )?;
+                let inventory = self.inventory.clone();
+                let drive_id = self.drive_id.clone();
+                let kind = payload.kind.as_str().to_string();
+                let path = payload.local_path_display();
+                let latest = tokio::task::spawn_blocking(move || {
+                    inventory.latest_task_for_path(&drive_id, &kind, &path)
+                }).await.context("Task lookup panicked")??;
                 if let Some(prev) = latest {
                     let prev_etag = prev
                         .custom_state
@@ -203,9 +237,9 @@ impl TaskQueue {
             record = record.with_custom_state(state);
         }
 
-        let inserted = self
-            .inventory
-            .insert_task_if_not_exist(&record)
+        let inventory = self.inventory.clone();
+        let inserted = tokio::task::spawn_blocking(move || inventory.insert_task_if_not_exist(&record))
+            .await.context("Task insertion panicked")?
             .with_context(|| format!("Failed to persist task {}", task_id))?;
 
         if !inserted {
@@ -223,6 +257,56 @@ impl TaskQueue {
         self.dispatch_task(task_id.clone(), payload)?;
         self.notifier.notify();
         Ok(task_id)
+    }
+
+    /// Persist reconciliation work in bounded transactions before dispatching.
+    pub async fn enqueue_many(&self, payloads: Vec<TaskPayload>) -> Result<usize> {
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return Err(anyhow!("task queue is shutting down"));
+        }
+        let mut count = 0;
+        let mut remaining = payloads.into_iter();
+        loop {
+            let batch: Vec<_> = remaining.by_ref().take(250).collect();
+            if batch.is_empty() { break; }
+            let mut prepared = Vec::new();
+            let mut records = Vec::new();
+            for payload in batch {
+                if payload.force_override {
+                    self.enqueue(payload).await?;
+                    count += 1;
+                    continue;
+                }
+                crate::drive::utils::SafeSyncPath::from_local(&payload.local_path, &self.sync_path)?
+                    .join_checked(&self.sync_path)?;
+                let id = payload.task_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
+                let mut record = NewTaskRecord::new(id.clone(), self.drive_id.clone(),
+                    payload.kind.as_str().to_string(), payload.local_path_display())
+                    .with_priority(payload.priority);
+                if let Some(total) = payload.total_bytes {
+                    record = record.with_totals(total, payload.processed_bytes.unwrap_or(0));
+                } else if let Some(processed) = payload.processed_bytes {
+                    record = record.with_totals(0, processed);
+                }
+                if let Some(state) = payload.custom_state.clone() {
+                    record = record.with_custom_state(state);
+                }
+                records.push(record);
+                prepared.push((id, payload));
+            }
+            if records.is_empty() { continue; }
+            let inventory = self.inventory.clone();
+            let inserted = tokio::task::spawn_blocking(move || inventory.insert_task_batch(&records))
+                .await.context("Task batch insertion panicked")??;
+            for ((id, payload), was_inserted) in prepared.into_iter().zip(inserted) {
+                if was_inserted {
+                    self.dispatch_task(id.clone(), payload.with_task_id(id))?;
+                    count += 1;
+                }
+            }
+        }
+        if count > 0 { self.notifier.notify(); }
+        Ok(count)
     }
 
     pub fn notifier(&self) -> &Arc<SummaryNotifier> {
@@ -285,6 +369,7 @@ impl TaskQueue {
 
         if let Some(handle) = self.dispatcher_handle.lock().await.take() {
             handle.abort();
+            let _ = handle.await;
         }
 
         self.cancel_running_tasks().await;
@@ -354,10 +439,19 @@ impl TaskQueue {
                 "Re-enqueuing offline-waiting task"
             );
 
+            let mut custom_state = record.custom_state.clone().unwrap_or_default();
+            if let Some(fields) = custom_state.as_object_mut() {
+                fields.remove("offline_waiting");
+            }
+            let custom_state = if custom_state.as_object().is_some_and(|fields| fields.is_empty()) {
+                None
+            } else {
+                Some(custom_state)
+            };
             if let Err(err) = self.inventory.update_task(
                 &record.id,
                 TaskUpdate {
-                    custom_state: Some(None),
+                    custom_state: Some(custom_state),
                     ..Default::default()
                 },
             ) {
@@ -766,7 +860,8 @@ impl TaskQueue {
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0) as u32;
 
-                    if retry_count < MAX_NETWORK_RETRIES {
+                    let max_retries = if task.payload.kind == TaskKind::VerifyCollision { 3 } else { MAX_NETWORK_RETRIES };
+                    if retry_count < max_retries {
                         warn!(
                             target: "tasks::queue",
                             drive = %self.drive_id,
@@ -774,14 +869,17 @@ impl TaskQueue {
                             retry = retry_count + 1,
                             "Network error, marking task as offline-waiting"
                         );
+                        let mut retry_state = task.payload.custom_state.clone().unwrap_or_else(|| serde_json::json!({}));
+                        if !retry_state.is_object() {
+                            retry_state = serde_json::json!({});
+                        }
+                        retry_state["network_retries"] = serde_json::json!(retry_count + 1);
+                        retry_state["offline_waiting"] = serde_json::json!(true);
                         if let Err(update_err) = self.inventory.update_task(
                             &task.task_id,
                             TaskUpdate {
                                 status: Some(TaskStatus::Pending),
-                                custom_state: Some(Some(serde_json::json!({
-                                    "network_retries": retry_count + 1,
-                                    "offline_waiting": true
-                                }))),
+                                custom_state: Some(Some(retry_state)),
                                 ..Default::default()
                             },
                         ) {
@@ -797,6 +895,10 @@ impl TaskQueue {
                         self.notifier.notify();
                         return;
                     }
+                }
+
+                if task.payload.kind == TaskKind::VerifyCollision {
+                    verify_collision::fail_to_conflict(&self.inventory, &self.drive_id, &task.payload.local_path);
                 }
 
                 if let Err(update_err) = self.inventory.update_task(
@@ -825,6 +927,8 @@ impl TaskQueue {
     }
 
     async fn run_placeholder_task(&self, task: &QueuedTask) -> Result<TaskRunState> {
+        crate::drive::utils::SafeSyncPath::from_local(&task.payload.local_path, &self.sync_path)?
+            .join_checked(&self.sync_path)?;
         info!(
             target: "tasks::queue",
             drive = %self.drive_id,
@@ -861,9 +965,23 @@ impl TaskQueue {
                     Arc::clone(&self.notifier),
                     self.event_blocker.clone(),
                     self.max_file_size_mb,
+                    self.download_client.clone(),
+                    self.approved_http_origin.clone(),
                 );
 
                 task_executor.execute().await?;
+            }
+            TaskKind::VerifyCollision => {
+                verify_collision::execute(
+                    task,
+                    self.inventory.clone(),
+                    self.cr_client.clone(),
+                    self.download_client.clone(),
+                    &self.approved_http_origin,
+                    &self.drive_id,
+                    &self.sync_path,
+                    &self.remote_base,
+                ).await?;
             }
         }
 
@@ -1043,13 +1161,18 @@ impl TaskQueue {
             .map(|entry| entry.key().clone())
             .collect();
 
+        let mut handles = Vec::new();
         for task_id in running {
             if let Some((_, handle)) = self.task_handles.remove(&task_id) {
                 handle.abort();
+                handles.push(handle);
             }
 
             self.progress.remove(&task_id);
             self.task_paths.remove(&task_id);
+        }
+        for handle in handles {
+            let _ = handle.await;
         }
     }
 

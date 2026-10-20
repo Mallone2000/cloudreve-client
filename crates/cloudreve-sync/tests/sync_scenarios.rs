@@ -12,6 +12,8 @@ mod common;
 
 use cloudreve_sync::inventory::ConflictState;
 use common::{TestEnv, remote_file};
+use serde_json::json;
+use wiremock::{Mock, ResponseTemplate, matchers::{method, path}};
 
 // ---------------------------------------------------------------------------
 // Initial sync
@@ -50,21 +52,74 @@ async fn new_local_file_is_uploaded() {
     assert!(env.tasks_of_type("download").is_empty());
 }
 
-/// The same file already exists on both sides (e.g. re-adding a drive):
-/// it must be adopted as synced without transferring anything.
+/// An initial collision is adopted only after comparing actual bytes.
 #[tokio::test]
 async fn identical_file_on_both_sides_is_adopted_without_transfer() {
     let env = TestEnv::new().await;
     env.write_local("photo.jpg", &[0u8; 512]);
     env.set_remote_files(vec![remote_file("photo.jpg", 512, "etag-photo")])
         .await;
+    mock_collision_download(&env, "photo.jpg", vec![0u8; 512], "etag-photo").await;
 
     env.full_sync().await.unwrap();
+    wait_for_verification(&env).await;
 
-    assert!(env.all_tasks().is_empty(), "no transfer for an identical file");
+    assert_eq!(env.tasks_of_type("verify_collision").len(), 1);
+    assert!(env.tasks_of_type("upload").is_empty());
+    assert!(env.tasks_of_type("download").is_empty());
     let entry = env.db_entry("photo.jpg").expect("file must be tracked");
     assert_eq!(entry.etag, "etag-photo");
     assert!(entry.conflict_state.is_none());
+}
+
+async fn mock_collision_download(env: &TestEnv, name: &str, content: Vec<u8>, etag: &str) {
+    Mock::given(method("GET"))
+        .and(path("/api/v4/file/info"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "code": 0, "msg": "", "data": remote_file(name, content.len() as i64, etag),
+        })))
+        .mount(&env.server).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v4/file/url"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "code": 0, "msg": "", "data": {
+                "urls": [{ "url": format!("{}/blob/{name}", env.server.uri()) }],
+                "expires": "2099-01-01T00:00:00Z",
+            },
+        })))
+        .mount(&env.server).await;
+    Mock::given(method("GET"))
+        .and(path(format!("/blob/{name}")))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(content))
+        .mount(&env.server).await;
+}
+
+async fn wait_for_verification(env: &TestEnv) {
+    for _ in 0..100 {
+        if env.tasks_of_type("verify_collision").iter().any(|task| {
+            matches!(task.status, cloudreve_sync::inventory::TaskStatus::Completed | cloudreve_sync::inventory::TaskStatus::Failed)
+        }) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("Collision verification did not finish");
+}
+
+#[tokio::test]
+async fn unequal_same_size_collision_becomes_a_conflict() {
+    let env = TestEnv::new().await;
+    env.write_local("same.txt", b"local");
+    env.set_remote_files(vec![remote_file("same.txt", 5, "etag-remote")]).await;
+    mock_collision_download(&env, "same.txt", b"other".to_vec(), "etag-remote").await;
+
+    env.full_sync().await.unwrap();
+    wait_for_verification(&env).await;
+
+    assert_eq!(env.db_entry("same.txt").unwrap().conflict_state, Some(ConflictState::Pending));
+    assert_eq!(std::fs::read(env.local_path("same.txt")).unwrap(), b"local");
+    assert!(env.tasks_of_type("upload").is_empty());
+    assert!(env.tasks_of_type("download").is_empty());
 }
 
 // ---------------------------------------------------------------------------

@@ -54,6 +54,8 @@ impl Default for UploaderConfig {
 pub struct UploadParams {
     /// Local file path
     pub local_path: PathBuf,
+    /// Root directory used for descriptor-relative, symlink-safe reads.
+    pub sync_root: PathBuf,
     /// Remote URI (cloudreve path)
     pub remote_uri: String,
     /// File size in bytes
@@ -130,7 +132,6 @@ impl Uploader {
         info!(
             target: "uploader",
             local_path = %params.local_path.display(),
-            remote_uri = %params.remote_uri,
             file_size = params.file_size,
             "Starting upload"
         );
@@ -171,6 +172,7 @@ impl Uploader {
         let result = chunk_uploader
             .upload_all(
                 &params.local_path,
+                &params.sync_root,
                 &mut session,
                 progress,
                 &self.cancel_token,

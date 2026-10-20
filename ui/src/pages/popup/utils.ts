@@ -27,27 +27,3 @@ export function getParentFolderName(path: string): string {
   parts.pop();
   return parts[parts.length - 1] || "";
 }
-
-export function rgbaToDataUrl(
-  base64Data: string,
-  width: number,
-  height: number
-): string {
-  const binaryString = atob(base64Data);
-  const bytes = new Uint8Array(binaryString.length);
-  for (let i = 0; i < binaryString.length; i++) {
-    bytes[i] = binaryString.charCodeAt(i);
-  }
-
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return "";
-
-  const imageData = ctx.createImageData(width, height);
-  imageData.data.set(bytes);
-  ctx.putImageData(imageData, 0, 0);
-
-  return canvas.toDataURL("image/png");
-}

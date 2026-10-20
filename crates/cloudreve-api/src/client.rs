@@ -7,10 +7,29 @@ use serde::Serialize;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use futures_util::StreamExt;
 use tokio::sync::RwLock;
 
 const API_PREFIX: &str = "/api/v4";
+const MAX_API_BODY: usize = 16 * 1024 * 1024;
 pub const CR_HEADER_PREFIX: &str = "X-Cr-";
+
+/// Read JSON with a hard cap even when the server omits Content-Length.
+pub(crate) async fn capped_response_json<T: DeserializeOwned>(response: reqwest::Response) -> ApiResult<T> {
+    if response.content_length().is_some_and(|length| length > MAX_API_BODY as u64) {
+        return Err(ApiError::Other("Cloudreve API response exceeded 16 MiB".into()));
+    }
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if chunk.len() > MAX_API_BODY.saturating_sub(body.len()) {
+            return Err(ApiError::Other("Cloudreve API response exceeded 16 MiB".into()));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(serde_json::from_slice(&body)?)
+}
 
 /// Client configuration
 #[derive(Debug, Clone)]
@@ -23,6 +42,45 @@ pub struct ClientConfig {
     pub client_id: String,
     /// User agent string for HTTP requests
     pub user_agent: Option<String>,
+}
+
+#[cfg(test)]
+mod download_url_tests {
+    use super::*;
+
+    #[test]
+    fn keeps_signed_cdn_host_and_query() {
+        let client = Client::new(ClientConfig::new("https://cloud.example.com"));
+        let signed = "https://cdn.example.net/blob?a=signature%2Bvalue";
+        assert_eq!(client.rewrite_url_origin(signed), signed);
+    }
+
+    #[test]
+    fn corrects_only_loopback_site_url() {
+        let client = Client::new(ClientConfig::new("https://cloud.example.com"));
+        assert_eq!(
+            client.rewrite_url_origin("http://localhost:5212/blob?a=signed"),
+            "https://cloud.example.com/blob?a=signed"
+        );
+    }
+}
+
+#[cfg(test)]
+mod response_limit_tests {
+    use super::*;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path}};
+
+    #[tokio::test]
+    async fn rejects_large_non_streaming_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v4/large"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![b'a'; MAX_API_BODY + 1]))
+            .mount(&server).await;
+        let client = Client::new(ClientConfig::new(server.uri()));
+        let result = client.get::<serde_json::Value>("/large", RequestOptions::new().no_credential()).await;
+        assert!(matches!(result, Err(ApiError::Other(message)) if message.contains("16 MiB")));
+    }
 }
 
 impl ClientConfig {
@@ -155,9 +213,18 @@ pub struct Client {
 impl Client {
     /// Create a new API client
     pub fn new(config: ClientConfig) -> Self {
+        let api_origin = url::Url::parse(&config.base_url).ok().map(|url| url.origin());
+        let redirect_origin = api_origin.clone();
         let mut builder = HttpClient::builder()
-            .connect_timeout(std::time::Duration::from_secs(config.timeout_seconds))
-            .read_timeout(std::time::Duration::from_secs(30));
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .read_timeout(std::time::Duration::from_secs(config.timeout_seconds))
+            .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                if attempt.previous().len() < 5 && redirect_origin.as_ref().is_some_and(|origin| &attempt.url().origin() == origin) {
+                    attempt.follow()
+                } else {
+                    attempt.stop()
+                }
+            }));
 
         if let Some(ref user_agent) = config.user_agent {
             builder = builder.user_agent(user_agent);
@@ -166,7 +233,14 @@ impl Client {
         let http_client = builder.build().expect("Failed to create HTTP client");
 
         let mut sse_builder = HttpClient::builder()
-            .connect_timeout(std::time::Duration::from_secs(config.timeout_seconds));
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                if attempt.previous().len() < 5 && api_origin.as_ref().is_some_and(|origin| &attempt.url().origin() == origin) {
+                    attempt.follow()
+                } else {
+                    attempt.stop()
+                }
+            }));
 
         if let Some(ref user_agent) = config.user_agent {
             sse_builder = sse_builder.user_agent(user_agent);
@@ -198,9 +272,9 @@ impl Client {
     ///
     /// let config = ClientConfig::new("https://example.com");
     /// let mut client = Client::new(config);
-    /// client.set_on_credential_refreshed(Arc::new(|token| {
+    /// client.set_on_credential_refreshed(Arc::new(|_token| {
     ///     Box::pin(async move {
-    ///         println!("New access token: {}", token.access_token);
+    ///         // Persist the refreshed credentials in private storage.
     ///     })
     /// }));
     /// ```
@@ -402,7 +476,7 @@ impl Client {
 
         let response = self.http_client.post(&url).json(&request).send().await?;
 
-        let api_response: ApiResponse<Token> = response.json().await?;
+        let api_response: ApiResponse<Token> = capped_response_json(response).await?;
 
         if api_response.code != ErrorCode::Success as i32 {
             if let Some(error_code) = ErrorCode::from_code(api_response.code) {
@@ -434,34 +508,23 @@ impl Client {
         format!("{}{}{}", self.config.base_url, API_PREFIX, path)
     }
 
-    /// Rewrite a URL's origin (scheme + host + port) to match this client's base URL.
-    ///
-    /// The Cloudreve server may return download/content URLs using its internally configured
-    /// `SiteURL` (e.g. `http://localhost:5212`), which is wrong when the client is connected
-    /// to a remote instance. This method replaces the origin in `url` with the origin of
-    /// `config.base_url` so the request goes to the correct host.
+    /// Correct only a loopback SiteURL returned by a remotely accessed server.
+    /// Signed object-storage and CDN URLs must keep their original host and query.
     pub fn rewrite_url_origin(&self, url: &str) -> String {
-        let base = &self.config.base_url;
-
-        // Extract origin from base_url: everything up to (but not including) the first '/'
-        // after "scheme://host[:port]". If no path '/' exists, the whole string is the origin.
-        let base_origin_end = base
-            .find("://")
-            .and_then(|idx| {
-                base[idx + 3..].find('/').map(|slash| idx + 3 + slash)
-            })
-            .unwrap_or(base.len());
-        let base_origin = &base[..base_origin_end];
-
-        // Extract origin from the URL to rewrite.
-        let url_origin_end = url
-            .find("://")
-            .and_then(|idx| {
-                url[idx + 3..].find('/').map(|slash| idx + 3 + slash)
-            })
-            .unwrap_or(url.len());
-
-        format!("{}{}", base_origin, &url[url_origin_end..])
+        let (Ok(mut returned), Ok(base)) = (url::Url::parse(url), url::Url::parse(&self.config.base_url)) else {
+            return url.to_string();
+        };
+        let loopback = |host: Option<&str>| matches!(host, Some("localhost" | "127.0.0.1" | "[::1]" | "::1"));
+        if !loopback(returned.host_str()) || loopback(base.host_str()) {
+            return url.to_string();
+        }
+        if returned.set_scheme(base.scheme()).is_err()
+            || returned.set_host(base.host_str()).is_err()
+            || returned.set_port(base.port()).is_err()
+        {
+            return url.to_string();
+        }
+        returned.to_string()
     }
 
     /// Internal send method that handles the actual HTTP request
@@ -509,31 +572,19 @@ impl Client {
 
         // Execute request
         let response = request.send().await?;
-        let response_text = response.text().await?;
-
-        // First parse as a generic Value to check the error code
-        let raw_value: serde_json::Value = serde_json::from_str(&response_text)?;
-
-        let code = raw_value.get("code").and_then(|c| c.as_i64()).unwrap_or(0) as i32;
+        let api_response: ApiResponse<serde_json::Value> = capped_response_json(response).await?;
+        let code = api_response.code;
 
         // Handle lock conflict specially - data contains LockConflictDetail
         if code == ErrorCode::LockConflict as i32 {
-            let msg = raw_value
-                .get("msg")
-                .and_then(|m| m.as_str())
-                .unwrap_or("")
-                .to_string();
-            let detail: Option<LockConflictDetail> = raw_value
-                .get("data")
-                .and_then(|d| serde_json::from_value(d.clone()).ok());
+            let msg = api_response.msg.clone();
+            let detail: Option<LockConflictDetail> = api_response.data.as_ref()
+                .and_then(|data| serde_json::from_value(data.clone()).ok());
             return Err(ApiError::LockConflict {
                 message: msg,
                 detail,
             });
         }
-
-        // Parse as the expected response type
-        let api_response: ApiResponse<R> = serde_json::from_str(&response_text)?;
 
         // Check response code
         if api_response.code != ErrorCode::Success as i32 {
@@ -551,7 +602,7 @@ impl Client {
         }
 
         // Return data
-        Ok(api_response.data.unwrap_or_default())
+        api_response.data.map(serde_json::from_value).transpose().map(|value| value.unwrap_or_default()).map_err(ApiError::from)
     }
 
     /// Send an API request with automatic token refresh
