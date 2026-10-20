@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{remote_file, TestEnv};
+use common::{TestEnv, remote_file};
 
 /// Poll until `done` holds, failing after `timeout`. A fixed sleep makes any
 /// count assertion behind it a race against the command processor on a
@@ -30,7 +30,9 @@ async fn os_junk_appearing_locally_is_never_uploaded() {
 
     let uploads = env.tasks_of_type("upload");
     assert!(
-        uploads.iter().all(|t| t.local_path.ends_with("photos/holiday.jpg")),
+        uploads
+            .iter()
+            .all(|t| t.local_path.ends_with("photos/holiday.jpg")),
         "junk was queued for upload: {:?}",
         uploads.iter().map(|t| &t.local_path).collect::<Vec<_>>()
     );
@@ -70,9 +72,15 @@ async fn a_local_change_batch_containing_junk_only_uploads_the_real_file() {
         mode: SyncMode::LocalChanged,
         user_initiated: false,
     });
-    wait_until(Duration::from_secs(5), "the real file's upload never appeared", || {
-        env.tasks_of_type("upload").iter().any(|t| t.local_path.ends_with("notes.txt"))
-    })
+    wait_until(
+        Duration::from_secs(5),
+        "the real file's upload never appeared",
+        || {
+            env.tasks_of_type("upload")
+                .iter()
+                .any(|t| t.local_path.ends_with("notes.txt"))
+        },
+    )
     .await;
 
     let uploads = env.tasks_of_type("upload");
@@ -104,22 +112,37 @@ async fn a_remote_event_for_ignored_junk_does_not_trigger_a_download() {
     // Junk first, real file last: the batch is walked in order, so once the
     // real download shows up the junk path has already been decided.
     let _ = env.mount.command_tx.send(MountCommand::Sync {
-        local_paths: vec![env.local_path(".DS_Store"), env.local_path("photos/holiday.jpg")],
+        local_paths: vec![
+            env.local_path(".DS_Store"),
+            env.local_path("photos/holiday.jpg"),
+        ],
         mode: SyncMode::RemoteChanged,
         user_initiated: false,
     });
-    wait_until(Duration::from_secs(5), "the real file's download never appeared", || {
-        env.tasks_of_type("download").iter().any(|t| t.local_path.ends_with("holiday.jpg"))
-    })
+    wait_until(
+        Duration::from_secs(5),
+        "the real file's download never appeared",
+        || {
+            env.tasks_of_type("download")
+                .iter()
+                .any(|t| t.local_path.ends_with("holiday.jpg"))
+        },
+    )
     .await;
 
     let downloads = env.tasks_of_type("download");
     assert!(
-        downloads.iter().all(|t| t.local_path.ends_with("photos/holiday.jpg")),
+        downloads
+            .iter()
+            .all(|t| t.local_path.ends_with("photos/holiday.jpg")),
         "junk was queued for download: {:?}",
         downloads.iter().map(|t| &t.local_path).collect::<Vec<_>>()
     );
-    assert_eq!(downloads.len(), 1, "the real file should still be downloaded");
+    assert_eq!(
+        downloads.len(),
+        1,
+        "the real file should still be downloaded"
+    );
 }
 
 /// Junk that already made it to the server before the ignore rules existed must
@@ -136,7 +159,8 @@ async fn os_junk_already_tracked_stops_being_transferred() {
     env.write_local(".DS_Store", b"finder junk");
     env.track_synced(".DS_Store", "etag-1");
     // Another machine rewrote it: new etag, so the engine would want it.
-    env.set_remote_files(vec![remote_file(".DS_Store", 11, "etag-2")]).await;
+    env.set_remote_files(vec![remote_file(".DS_Store", 11, "etag-2")])
+        .await;
 
     env.full_sync().await.unwrap();
 
@@ -174,11 +198,17 @@ async fn junk_that_only_exists_on_the_server_is_not_downloaded() {
 
     let downloads = env.tasks_of_type("download");
     assert!(
-        downloads.iter().all(|t| t.local_path.ends_with("report.pdf")),
+        downloads
+            .iter()
+            .all(|t| t.local_path.ends_with("report.pdf")),
         "server-side junk was pulled down: {:?}",
         downloads.iter().map(|t| &t.local_path).collect::<Vec<_>>()
     );
-    assert_eq!(downloads.len(), 1, "the real file should still be downloaded");
+    assert_eq!(
+        downloads.len(),
+        1,
+        "the real file should still be downloaded"
+    );
 }
 
 /// Spotlight's index is a directory of thousands of shards, none of which is
@@ -221,11 +251,17 @@ async fn the_contents_of_a_junk_directory_are_not_downloaded() {
 
     let downloads = env.tasks_of_type("download");
     assert!(
-        downloads.iter().all(|t| t.local_path.ends_with("report.pdf")),
+        downloads
+            .iter()
+            .all(|t| t.local_path.ends_with("report.pdf")),
         "junk directory contents were pulled down: {:?}",
         downloads.iter().map(|t| &t.local_path).collect::<Vec<_>>()
     );
-    assert_eq!(downloads.len(), 1, "the real file should still be downloaded");
+    assert_eq!(
+        downloads.len(),
+        1,
+        "the real file should still be downloaded"
+    );
 }
 
 /// A drive shared with a Windows machine.
@@ -251,7 +287,9 @@ async fn junk_written_in_another_case_is_still_ignored_by_a_real_sync() {
 
     let uploads = env.tasks_of_type("upload");
     assert!(
-        uploads.iter().all(|t| t.local_path.ends_with("invoice.xlsx")),
+        uploads
+            .iter()
+            .all(|t| t.local_path.ends_with("invoice.xlsx")),
         "lower/upper-case junk was uploaded: {:?}",
         uploads.iter().map(|t| &t.local_path).collect::<Vec<_>>()
     );
@@ -259,11 +297,17 @@ async fn junk_written_in_another_case_is_still_ignored_by_a_real_sync() {
 
     let downloads = env.tasks_of_type("download");
     assert!(
-        downloads.iter().all(|t| t.local_path.ends_with("report.pdf")),
+        downloads
+            .iter()
+            .all(|t| t.local_path.ends_with("report.pdf")),
         "lower-case junk was pulled down: {:?}",
         downloads.iter().map(|t| &t.local_path).collect::<Vec<_>>()
     );
-    assert_eq!(downloads.len(), 1, "the real file should still be downloaded");
+    assert_eq!(
+        downloads.len(),
+        1,
+        "the real file should still be downloaded"
+    );
 }
 
 /// Tasks queued by the *previous* version, before the filter existed.
@@ -351,8 +395,8 @@ async fn ignoring_a_file_never_deletes_it_from_disk() {
 /// fallback.
 #[tokio::test]
 async fn a_bad_pattern_in_the_saved_config_does_not_disable_the_defaults() {
-    let env = TestEnv::with_ignore_patterns(vec!["[unclosed".to_string(), "*.log".to_string()])
-        .await;
+    let env =
+        TestEnv::with_ignore_patterns(vec!["[unclosed".to_string(), "*.log".to_string()]).await;
     env.set_remote_files(vec![]).await;
 
     env.write_local(".DS_Store", b"finder junk");
@@ -380,7 +424,10 @@ async fn saving_your_own_patterns_in_settings_keeps_the_built_in_defaults() {
     let env = TestEnv::new().await;
     env.set_remote_files(vec![]).await;
 
-    env.mount.update_ignore_patterns(vec!["*.log".to_string()]).await.unwrap();
+    env.mount
+        .update_ignore_patterns(vec!["*.log".to_string()])
+        .await
+        .unwrap();
 
     env.write_local(".DS_Store", b"finder junk");
     env.write_local("debug.log", b"user-excluded");
@@ -407,7 +454,10 @@ async fn saving_your_own_patterns_in_settings_keeps_the_built_in_defaults() {
 async fn a_typo_in_the_users_patterns_is_rejected_when_saving() {
     let env = TestEnv::new().await;
 
-    env.mount.update_ignore_patterns(vec!["*.log".to_string()]).await.unwrap();
+    env.mount
+        .update_ignore_patterns(vec!["*.log".to_string()])
+        .await
+        .unwrap();
 
     let err = env
         .mount
@@ -443,10 +493,14 @@ async fn edits_made_while_a_path_was_ignored_are_uploaded_once_it_no_longer_is()
     // In sync on both sides.
     env.write_local("report.psd", b"version 1");
     env.track_synced("report.psd", "etag-1");
-    env.set_remote_files(vec![remote_file("report.psd", 9, "etag-1")]).await;
+    env.set_remote_files(vec![remote_file("report.psd", 9, "etag-1")])
+        .await;
 
     // The user pauses it with a pattern, a sync runs, then they edit it.
-    env.mount.update_ignore_patterns(vec!["*.psd".to_string()]).await.unwrap();
+    env.mount
+        .update_ignore_patterns(vec!["*.psd".to_string()])
+        .await
+        .unwrap();
     env.full_sync().await.unwrap();
     assert!(
         env.all_tasks().is_empty(),
@@ -481,18 +535,27 @@ async fn a_pending_conflict_survives_its_path_being_ignored() {
 
     env.write_local("notes.txt", b"local version");
     env.track_synced("notes.txt", "etag-1");
-    env.set_remote_files(vec![remote_file("notes.txt", 14, "etag-2")]).await;
+    env.set_remote_files(vec![remote_file("notes.txt", 14, "etag-2")])
+        .await;
 
     let path = env.local_path("notes.txt");
     env.inventory
         .mark_as_conflicted(path.to_str().unwrap(), Some(ConflictState::Pending))
         .unwrap();
 
-    env.mount.update_ignore_patterns(vec!["notes.*".to_string()]).await.unwrap();
+    env.mount
+        .update_ignore_patterns(vec!["notes.*".to_string()])
+        .await
+        .unwrap();
     env.full_sync().await.unwrap();
 
-    assert!(env.all_tasks().is_empty(), "a frozen conflict must not be transferred");
-    let entry = env.db_entry("notes.txt").expect("the conflicted row was wiped");
+    assert!(
+        env.all_tasks().is_empty(),
+        "a frozen conflict must not be transferred"
+    );
+    let entry = env
+        .db_entry("notes.txt")
+        .expect("the conflicted row was wiped");
     assert_eq!(
         entry.conflict_state,
         Some(ConflictState::Pending),

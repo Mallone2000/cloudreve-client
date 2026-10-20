@@ -25,7 +25,10 @@ async fn wait_for_failed_download(env: &TestEnv) -> String {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("expected a failed download, got: {:?}", env.tasks_of_type("download"));
+    panic!(
+        "expected a failed download, got: {:?}",
+        env.tasks_of_type("download")
+    );
 }
 
 /// A remote file larger than the free space on the sync volume must never be

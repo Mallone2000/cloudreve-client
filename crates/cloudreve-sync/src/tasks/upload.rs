@@ -4,7 +4,7 @@ use crate::events::SummaryNotifier;
 use crate::utils::toast::send_conflict_toast;
 use crate::{
     drive::utils::local_path_to_cr_uri,
-    inventory::{local_mtime_secs, ConflictState, FileMetadata, InventoryDb, MetadataEntry},
+    inventory::{ConflictState, FileMetadata, InventoryDb, MetadataEntry, local_mtime_secs},
     tasks::queue::QueuedTask,
     uploader::{ProgressCallback, ProgressUpdate, UploadParams, Uploader, UploaderConfig},
 };
@@ -35,7 +35,11 @@ impl InMemoryProgressReporter {
         progress_map: Arc<DashMap<String, TaskProgress>>,
         notifier: Arc<SummaryNotifier>,
     ) -> Self {
-        Self { task_id, progress_map, notifier }
+        Self {
+            task_id,
+            progress_map,
+            notifier,
+        }
     }
 }
 
@@ -134,8 +138,16 @@ impl<'a> UploadTask<'a> {
         let file_size = local_info.file_size;
         self.local_info = Some(local_info);
 
-        let path_str = self.task.payload.local_path.to_str().context("invalid path")?;
-        self.inventory_meta = self.inventory.query_by_path(path_str).context("failed to query inventory")?;
+        let path_str = self
+            .task
+            .payload
+            .local_path
+            .to_str()
+            .context("invalid path")?;
+        self.inventory_meta = self
+            .inventory
+            .query_by_path(path_str)
+            .context("failed to query inventory")?;
 
         let upload_res = match (
             is_directory,
@@ -172,7 +184,10 @@ impl<'a> UploadTask<'a> {
                     warn!(target: "tasks::upload", task_id = %self.task.task_id, path = %self.task.payload.local_path_display(), "Conflict detected");
 
                     let path_str = self.task.payload.local_path.to_str().unwrap_or_default();
-                    if let Err(mark_err) = self.inventory.mark_as_conflicted(path_str, Some(ConflictState::Pending)) {
+                    if let Err(mark_err) = self
+                        .inventory
+                        .mark_as_conflicted(path_str, Some(ConflictState::Pending))
+                    {
                         warn!(target: "tasks::upload", error = ?mark_err, "Failed to mark conflict");
                     }
 
@@ -194,11 +209,27 @@ impl<'a> UploadTask<'a> {
             self.task.payload.local_path.clone(),
             self.sync_path.clone(),
             self.remote_base.clone(),
-        ).context("failed to compute remote URI")?.to_string();
-        let etag = self.inventory_meta.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("inventory metadata required for clear_file_content but none found"))?
-            .etag.clone();
-        let res = self.cr_client.update_file(&FileUpdateService { uri, previous: Some(etag) }, Bytes::new()).await;
+        )
+        .context("failed to compute remote URI")?
+        .to_string();
+        let etag = self
+            .inventory_meta
+            .as_ref()
+            .ok_or_else(|| {
+                anyhow::anyhow!("inventory metadata required for clear_file_content but none found")
+            })?
+            .etag
+            .clone();
+        let res = self
+            .cr_client
+            .update_file(
+                &FileUpdateService {
+                    uri,
+                    previous: Some(etag),
+                },
+                Bytes::new(),
+            )
+            .await;
         match res {
             Ok(file) => self.file_uploaded(&file),
             Err(e) => Err(e.into()),
@@ -206,8 +237,11 @@ impl<'a> UploadTask<'a> {
     }
 
     async fn upload_file_with_uploader(&mut self) -> Result<()> {
-        let local_info = self.local_info.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("local file info not available — file may have been deleted before upload started"))?;
+        let local_info = self.local_info.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "local file info not available — file may have been deleted before upload started"
+            )
+        })?;
         let file_size = local_info.file_size;
         let last_modified = local_info.last_modified;
         let is_new_file = self.inventory_meta.is_none();
@@ -218,7 +252,9 @@ impl<'a> UploadTask<'a> {
             self.task.payload.local_path.clone(),
             self.sync_path.clone(),
             self.remote_base.clone(),
-        ).context("failed to compute remote URI")?.to_string();
+        )
+        .context("failed to compute remote URI")?
+        .to_string();
 
         let previous_version = if let Some(meta) = &self.inventory_meta {
             if matches!(meta.conflict_state, Some(ConflictState::Override)) {
@@ -257,13 +293,15 @@ impl<'a> UploadTask<'a> {
         let upload_result = uploader.upload(params.clone(), progress).await;
 
         match upload_result {
-            Err(e) if e.chain().any(|cause| {
-                matches!(
-                    cause.downcast_ref::<ApiError>(),
-                    Some(ApiError::ApiError { code, .. })
-                        if *code == ErrorCode::ObjectExisted as i32
-                )
-            }) => {
+            Err(e)
+                if e.chain().any(|cause| {
+                    matches!(
+                        cause.downcast_ref::<ApiError>(),
+                        Some(ApiError::ApiError { code, .. })
+                            if *code == ErrorCode::ObjectExisted as i32
+                    )
+                }) =>
+            {
                 tracing::info!(
                     target: "tasks::upload",
                     task_id = %self.task.task_id,
@@ -280,12 +318,13 @@ impl<'a> UploadTask<'a> {
                     Arc::clone(&self.notifier),
                 );
                 let retry_config = UploaderConfig::default();
-                let retry_uploader = Uploader::new(
-                    self.cr_client.clone(),
-                    self.inventory.clone(),
-                    retry_config,
-                ).with_cancel_token(self.cancel_token.clone());
-                retry_uploader.upload(retry_params, retry_progress).await.context("upload failed (retry with overwrite)")?;
+                let retry_uploader =
+                    Uploader::new(self.cr_client.clone(), self.inventory.clone(), retry_config)
+                        .with_cancel_token(self.cancel_token.clone());
+                retry_uploader
+                    .upload(retry_params, retry_progress)
+                    .await
+                    .context("upload failed (retry with overwrite)")?;
             }
             Err(e) => return Err(e).context("upload failed"),
             Ok(()) => {}
@@ -299,9 +338,12 @@ impl<'a> UploadTask<'a> {
             self.task.payload.local_path.clone(),
             self.sync_path.clone(),
             self.remote_base.clone(),
-        ).context("failed to compute remote URI")?.to_string();
+        )
+        .context("failed to compute remote URI")?
+        .to_string();
 
-        let file_info = self.cr_client
+        let file_info = self
+            .cr_client
             .get_file_info(&cloudreve_api::models::explorer::GetFileInfoService {
                 uri: Some(uri),
                 id: None,
@@ -316,19 +358,32 @@ impl<'a> UploadTask<'a> {
 
     async fn create_empty_file_or_folder(&mut self) -> Result<()> {
         info!(target: "tasks::upload", task_id = %self.task.task_id, path = %self.task.payload.local_path_display(), "Creating empty file/folder");
-        let is_directory = self.local_info.as_ref().map(|i| i.is_directory).unwrap_or(false);
+        let is_directory = self
+            .local_info
+            .as_ref()
+            .map(|i| i.is_directory)
+            .unwrap_or(false);
         let uri = local_path_to_cr_uri(
             self.task.payload.local_path.clone(),
             self.sync_path.clone(),
             self.remote_base.clone(),
-        ).context("failed to compute remote URI")?.to_string();
+        )
+        .context("failed to compute remote URI")?
+        .to_string();
 
-        let res = self.cr_client.create_file(&CreateFileService {
-            uri,
-            file_type: if is_directory { "folder".to_string() } else { "file".to_string() },
-            err_on_conflict: Some(!is_directory),
-            metadata: None,
-        }).await;
+        let res = self
+            .cr_client
+            .create_file(&CreateFileService {
+                uri,
+                file_type: if is_directory {
+                    "folder".to_string()
+                } else {
+                    "file".to_string()
+                },
+                err_on_conflict: Some(!is_directory),
+                metadata: None,
+            })
+            .await;
 
         match res {
             Ok(file) => self.file_uploaded(&file),
@@ -341,7 +396,13 @@ impl<'a> UploadTask<'a> {
 
         // Update inventory with remote file info
         let drive_id = Uuid::from_str(self.drive_id).context("invalid drive_id")?;
-        let local_path_str = self.task.payload.local_path.to_str().unwrap_or_default().to_string();
+        let local_path_str = self
+            .task
+            .payload
+            .local_path
+            .to_str()
+            .unwrap_or_default()
+            .to_string();
         let is_folder = file.file_type == file_type::FOLDER;
 
         let parse_ts = |s: &str| -> i64 {
@@ -355,7 +416,9 @@ impl<'a> UploadTask<'a> {
             .with_etag(file.primary_entity.clone().unwrap_or_default())
             .with_size(file.size)
             .with_local_mtime(local_mtime_secs(&self.task.payload.local_path));
-        self.inventory.upsert(&entry).context("failed to update inventory")?;
+        self.inventory
+            .upsert(&entry)
+            .context("failed to update inventory")?;
 
         Ok(())
     }

@@ -75,7 +75,8 @@ impl InventoryDb {
     pub(crate) fn connection(
         &self,
     ) -> Result<PooledConnection<ConnectionManager<SqliteConnection>>> {
-        let connection = self.pool
+        let connection = self
+            .pool
             .get()
             .context("Failed to get connection from inventory pool")?;
         self.connection_checkouts.fetch_add(1, Ordering::Relaxed);

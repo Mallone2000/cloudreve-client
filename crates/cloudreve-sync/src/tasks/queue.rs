@@ -96,7 +96,9 @@ impl TaskQueue {
 
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let approved_http_origin = if allow_insecure_http {
-            url::Url::parse(instance_url).ok().filter(|url| url.scheme() == "http")
+            url::Url::parse(instance_url)
+                .ok()
+                .filter(|url| url.scheme() == "http")
         } else {
             None
         };
@@ -109,7 +111,11 @@ impl TaskQueue {
                     return attempt.stop();
                 }
                 if attempt.previous().first().is_some_and(|initial| {
-                    crate::tasks::download::allowed_download_redirect(initial, attempt.url(), &redirect_origin)
+                    crate::tasks::download::allowed_download_redirect(
+                        initial,
+                        attempt.url(),
+                        &redirect_origin,
+                    )
                 }) {
                     attempt.follow()
                 } else {
@@ -186,7 +192,9 @@ impl TaskQueue {
                 let path = payload.local_path_display();
                 let latest = tokio::task::spawn_blocking(move || {
                     inventory.latest_task_for_path(&drive_id, &kind, &path)
-                }).await.context("Task lookup panicked")??;
+                })
+                .await
+                .context("Task lookup panicked")??;
                 if let Some(prev) = latest {
                     let prev_etag = prev
                         .custom_state
@@ -238,9 +246,11 @@ impl TaskQueue {
         }
 
         let inventory = self.inventory.clone();
-        let inserted = tokio::task::spawn_blocking(move || inventory.insert_task_if_not_exist(&record))
-            .await.context("Task insertion panicked")?
-            .with_context(|| format!("Failed to persist task {}", task_id))?;
+        let inserted =
+            tokio::task::spawn_blocking(move || inventory.insert_task_if_not_exist(&record))
+                .await
+                .context("Task insertion panicked")?
+                .with_context(|| format!("Failed to persist task {}", task_id))?;
 
         if !inserted {
             tracing::trace!(
@@ -268,7 +278,9 @@ impl TaskQueue {
         let mut remaining = payloads.into_iter();
         loop {
             let batch: Vec<_> = remaining.by_ref().take(250).collect();
-            if batch.is_empty() { break; }
+            if batch.is_empty() {
+                break;
+            }
             let mut prepared = Vec::new();
             let mut records = Vec::new();
             for payload in batch {
@@ -277,12 +289,22 @@ impl TaskQueue {
                     count += 1;
                     continue;
                 }
-                crate::drive::utils::SafeSyncPath::from_local(&payload.local_path, &self.sync_path)?
-                    .join_checked(&self.sync_path)?;
-                let id = payload.task_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
-                let mut record = NewTaskRecord::new(id.clone(), self.drive_id.clone(),
-                    payload.kind.as_str().to_string(), payload.local_path_display())
-                    .with_priority(payload.priority);
+                crate::drive::utils::SafeSyncPath::from_local(
+                    &payload.local_path,
+                    &self.sync_path,
+                )?
+                .join_checked(&self.sync_path)?;
+                let id = payload
+                    .task_id
+                    .clone()
+                    .unwrap_or_else(|| Uuid::new_v4().to_string());
+                let mut record = NewTaskRecord::new(
+                    id.clone(),
+                    self.drive_id.clone(),
+                    payload.kind.as_str().to_string(),
+                    payload.local_path_display(),
+                )
+                .with_priority(payload.priority);
                 if let Some(total) = payload.total_bytes {
                     record = record.with_totals(total, payload.processed_bytes.unwrap_or(0));
                 } else if let Some(processed) = payload.processed_bytes {
@@ -294,10 +316,14 @@ impl TaskQueue {
                 records.push(record);
                 prepared.push((id, payload));
             }
-            if records.is_empty() { continue; }
+            if records.is_empty() {
+                continue;
+            }
             let inventory = self.inventory.clone();
-            let inserted = tokio::task::spawn_blocking(move || inventory.insert_task_batch(&records))
-                .await.context("Task batch insertion panicked")??;
+            let inserted =
+                tokio::task::spawn_blocking(move || inventory.insert_task_batch(&records))
+                    .await
+                    .context("Task batch insertion panicked")??;
             for ((id, payload), was_inserted) in prepared.into_iter().zip(inserted) {
                 if was_inserted {
                     self.dispatch_task(id.clone(), payload.with_task_id(id))?;
@@ -305,7 +331,9 @@ impl TaskQueue {
                 }
             }
         }
-        if count > 0 { self.notifier.notify(); }
+        if count > 0 {
+            self.notifier.notify();
+        }
         Ok(count)
     }
 
@@ -387,14 +415,14 @@ impl TaskQueue {
     /// excluded since. They are cancelled rather than skipped: a skipped task
     /// keeps its `offline_waiting` flag and comes back at every reconnection.
     pub fn re_enqueue_offline_tasks(&self, ignore: &IgnoreMatcher) -> Result<usize> {
-        let records = self.inventory.list_tasks(
-            Some(&self.drive_id),
-            Some(&[TaskStatus::Pending]),
-        )?;
+        let records = self
+            .inventory
+            .list_tasks(Some(&self.drive_id), Some(&[TaskStatus::Pending]))?;
 
         let mut count = 0;
         for record in records {
-            let is_offline = record.custom_state
+            let is_offline = record
+                .custom_state
                 .as_ref()
                 .and_then(|s| s.get("offline_waiting"))
                 .and_then(|v| v.as_bool())
@@ -443,7 +471,10 @@ impl TaskQueue {
             if let Some(fields) = custom_state.as_object_mut() {
                 fields.remove("offline_waiting");
             }
-            let custom_state = if custom_state.as_object().is_some_and(|fields| fields.is_empty()) {
+            let custom_state = if custom_state
+                .as_object()
+                .is_some_and(|fields| fields.is_empty())
+            {
                 None
             } else {
                 Some(custom_state)
@@ -854,13 +885,19 @@ impl TaskQueue {
                 );
 
                 if is_network_error(&err) {
-                    let retry_count = task.payload.custom_state
+                    let retry_count = task
+                        .payload
+                        .custom_state
                         .as_ref()
                         .and_then(|s| s.get("network_retries"))
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0) as u32;
 
-                    let max_retries = if task.payload.kind == TaskKind::VerifyCollision { 3 } else { MAX_NETWORK_RETRIES };
+                    let max_retries = if task.payload.kind == TaskKind::VerifyCollision {
+                        3
+                    } else {
+                        MAX_NETWORK_RETRIES
+                    };
                     if retry_count < max_retries {
                         warn!(
                             target: "tasks::queue",
@@ -869,7 +906,11 @@ impl TaskQueue {
                             retry = retry_count + 1,
                             "Network error, marking task as offline-waiting"
                         );
-                        let mut retry_state = task.payload.custom_state.clone().unwrap_or_else(|| serde_json::json!({}));
+                        let mut retry_state = task
+                            .payload
+                            .custom_state
+                            .clone()
+                            .unwrap_or_else(|| serde_json::json!({}));
                         if !retry_state.is_object() {
                             retry_state = serde_json::json!({});
                         }
@@ -898,7 +939,11 @@ impl TaskQueue {
                 }
 
                 if task.payload.kind == TaskKind::VerifyCollision {
-                    verify_collision::fail_to_conflict(&self.inventory, &self.drive_id, &task.payload.local_path);
+                    verify_collision::fail_to_conflict(
+                        &self.inventory,
+                        &self.drive_id,
+                        &task.payload.local_path,
+                    );
                 }
 
                 if let Err(update_err) = self.inventory.update_task(
@@ -981,7 +1026,8 @@ impl TaskQueue {
                     &self.drive_id,
                     &self.sync_path,
                     &self.remote_base,
-                ).await?;
+                )
+                .await?;
             }
         }
 

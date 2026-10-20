@@ -518,7 +518,8 @@ impl ExplorerApi for Client {
             .send()
             .await?;
 
-        let api_response: crate::error::ApiResponse<FileResponse> = crate::client::capped_response_json(response).await?;
+        let api_response: crate::error::ApiResponse<FileResponse> =
+            crate::client::capped_response_json(response).await?;
 
         if api_response.code != 0 {
             return Err(crate::error::ApiError::from_response(api_response));
@@ -588,7 +589,8 @@ impl ExplorerApi for Client {
             .send()
             .await?;
 
-        let api_response: crate::error::ApiResponse<UploadCredential> = crate::client::capped_response_json(response).await?;
+        let api_response: crate::error::ApiResponse<UploadCredential> =
+            crate::client::capped_response_json(response).await?;
 
         if api_response.code != 0 {
             return Err(crate::error::ApiError::from_response(api_response));
@@ -617,7 +619,8 @@ impl ExplorerApi for Client {
             .send()
             .await?;
 
-        let api_response: crate::error::ApiResponse<()> = crate::client::capped_response_json(response).await?;
+        let api_response: crate::error::ApiResponse<()> =
+            crate::client::capped_response_json(response).await?;
 
         if api_response.code != 0 {
             return Err(crate::error::ApiError::from_response(api_response));

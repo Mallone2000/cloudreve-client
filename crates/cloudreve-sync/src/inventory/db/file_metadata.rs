@@ -1,7 +1,5 @@
 use super::InventoryDb;
-use crate::inventory::{
-    ConflictState, FileMetadata, MetadataEntry,
-};
+use crate::inventory::{ConflictState, FileMetadata, MetadataEntry};
 use anyhow::{Context, Result};
 use diesel::prelude::*;
 use diesel::sql_types::Text;
@@ -13,7 +11,9 @@ use crate::inventory::schema::file_metadata::{self, dsl as file_metadata_dsl};
 impl InventoryDb {
     /// Persist a reconciliation batch in one SQLite transaction and checkout.
     pub fn batch_upsert(&self, entries: &[MetadataEntry]) -> Result<()> {
-        if entries.is_empty() { return Ok(()); }
+        if entries.is_empty() {
+            return Ok(());
+        }
         let mut conn = self.connection()?;
         (&mut *conn).transaction::<_, anyhow::Error, _>(|conn| {
             for entry in entries {
@@ -411,7 +411,9 @@ mod tests {
     }
 
     fn entry(drive: Uuid, path: &str, etag: &str) -> MetadataEntry {
-        MetadataEntry::new(drive, path, false).with_etag(etag).with_size(10)
+        MetadataEntry::new(drive, path, false)
+            .with_etag(etag)
+            .with_size(10)
     }
 
     /// Full conflict lifecycle: flag → listed → resolved → gone.
@@ -422,15 +424,28 @@ mod tests {
         db.upsert(&entry(drive, "/sync/a.txt", "v1")).unwrap();
 
         // Flag the conflict
-        assert!(db.mark_as_conflicted("/sync/a.txt", Some(ConflictState::Pending)).unwrap());
+        assert!(
+            db.mark_as_conflicted("/sync/a.txt", Some(ConflictState::Pending))
+                .unwrap()
+        );
         let conflicts = db.query_conflicts(Some(&drive.to_string())).unwrap();
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].conflict_state, Some(ConflictState::Pending));
 
         // Resolve it
         assert!(db.mark_as_conflicted("/sync/a.txt", None).unwrap());
-        assert!(db.query_conflicts(Some(&drive.to_string())).unwrap().is_empty());
-        assert!(db.query_by_path("/sync/a.txt").unwrap().unwrap().conflict_state.is_none());
+        assert!(
+            db.query_conflicts(Some(&drive.to_string()))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            db.query_by_path("/sync/a.txt")
+                .unwrap()
+                .unwrap()
+                .conflict_state
+                .is_none()
+        );
     }
 
     /// query_conflicts must only return conflicts of the requested drive.
@@ -441,10 +456,20 @@ mod tests {
         let drive_b = Uuid::new_v4();
         db.upsert(&entry(drive_a, "/a/file.txt", "v1")).unwrap();
         db.upsert(&entry(drive_b, "/b/file.txt", "v1")).unwrap();
-        db.mark_as_conflicted("/a/file.txt", Some(ConflictState::Pending)).unwrap();
+        db.mark_as_conflicted("/a/file.txt", Some(ConflictState::Pending))
+            .unwrap();
 
-        assert_eq!(db.query_conflicts(Some(&drive_a.to_string())).unwrap().len(), 1);
-        assert!(db.query_conflicts(Some(&drive_b.to_string())).unwrap().is_empty());
+        assert_eq!(
+            db.query_conflicts(Some(&drive_a.to_string()))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            db.query_conflicts(Some(&drive_b.to_string()))
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(db.query_conflicts(None).unwrap().len(), 1);
     }
 
@@ -455,13 +480,17 @@ mod tests {
         let (_dir, db) = test_db();
         let drive = Uuid::new_v4();
         db.upsert(&entry(drive, "/sync/a.txt", "v1")).unwrap();
-        db.mark_as_conflicted("/sync/a.txt", Some(ConflictState::Pending)).unwrap();
+        db.mark_as_conflicted("/sync/a.txt", Some(ConflictState::Pending))
+            .unwrap();
 
         // What upload/download tasks do after a successful transfer
         db.upsert(&entry(drive, "/sync/a.txt", "v2")).unwrap();
 
         let meta = db.query_by_path("/sync/a.txt").unwrap().unwrap();
-        assert!(meta.conflict_state.is_none(), "transfer must clear the conflict");
+        assert!(
+            meta.conflict_state.is_none(),
+            "transfer must clear the conflict"
+        );
         assert_eq!(meta.etag, "v2");
     }
 
@@ -472,7 +501,8 @@ mod tests {
         let (_dir, db) = test_db();
         let drive = Uuid::new_v4();
         db.upsert(&entry(drive, "/sync/a.txt", "v1")).unwrap();
-        db.mark_as_conflicted("/sync/a.txt", Some(ConflictState::Override)).unwrap();
+        db.mark_as_conflicted("/sync/a.txt", Some(ConflictState::Override))
+            .unwrap();
 
         assert!(db.query_conflicts(None).unwrap().is_empty());
     }
@@ -481,7 +511,10 @@ mod tests {
     #[test]
     fn marking_unknown_path_is_a_noop() {
         let (_dir, db) = test_db();
-        assert!(!db.mark_as_conflicted("/nowhere.txt", Some(ConflictState::Pending)).unwrap());
+        assert!(
+            !db.mark_as_conflicted("/nowhere.txt", Some(ConflictState::Pending))
+                .unwrap()
+        );
         assert!(db.query_conflicts(None).unwrap().is_empty());
     }
 }

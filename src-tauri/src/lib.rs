@@ -21,27 +21,40 @@ mod oauth;
 mod security_config_tests {
     #[test]
     fn desktop_webviews_have_csp_and_no_global_tauri() {
-        let config: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
         let security = &config["app"]["security"];
         assert_eq!(config["app"]["withGlobalTauri"], false);
         assert_eq!(security["csp"]["default-src"], "'self'");
         assert_eq!(security["csp"]["object-src"], "'none'");
-        assert_eq!(security["assetProtocol"]["scope"]["allow"],
-            serde_json::json!(["$HOME/.cloudreve/icos/**/*"]));
+        assert_eq!(
+            security["assetProtocol"]["scope"]["allow"],
+            serde_json::json!(["$HOME/.cloudreve/icos/**/*"])
+        );
     }
 
     #[test]
     fn oauth_commands_are_only_granted_to_add_drive_window() {
-        let default: serde_json::Value = serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
-        let settings: serde_json::Value = serde_json::from_str(include_str!("../capabilities/settings.json")).unwrap();
-        let add_drive: serde_json::Value = serde_json::from_str(include_str!("../capabilities/add-drive.json")).unwrap();
+        let default: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        let settings: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/settings.json")).unwrap();
+        let add_drive: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/add-drive.json")).unwrap();
         for other in [&default, &settings] {
             let permissions = other["permissions"].as_array().unwrap();
-            assert!(!permissions.iter().any(|permission| matches!(permission.as_str(), Some("app:allow-begin-oauth" | "app:allow-finish-oauth"))));
+            assert!(!permissions.iter().any(|permission| matches!(
+                permission.as_str(),
+                Some("app:allow-begin-oauth" | "app:allow-finish-oauth")
+            )));
         }
         let permissions = add_drive["permissions"].as_array().unwrap();
-        assert!(permissions.iter().any(|permission| permission.as_str() == Some("app:allow-begin-oauth")));
-        assert!(permissions.iter().any(|permission| permission.as_str() == Some("app:allow-finish-oauth")));
+        assert!(permissions
+            .iter()
+            .any(|permission| permission.as_str() == Some("app:allow-begin-oauth")));
+        assert!(permissions
+            .iter()
+            .any(|permission| permission.as_str() == Some("app:allow-finish-oauth")));
     }
 }
 
@@ -98,7 +111,11 @@ async fn init_sync_service(app: AppHandle) -> anyhow::Result<()> {
 
     event_broadcaster.connection_status_changed(true);
 
-    let state = AppState { drive_manager, event_broadcaster, log_guard };
+    let state = AppState {
+        drive_manager,
+        event_broadcaster,
+        log_guard,
+    };
 
     APP_STATE
         .set(state)
@@ -119,7 +136,9 @@ async fn init_sync_service(app: AppHandle) -> anyhow::Result<()> {
 }
 
 /// Check for available updates
-async fn check_for_updates(app_handle: &AppHandle) -> anyhow::Result<Option<tauri_plugin_updater::Update>> {
+async fn check_for_updates(
+    app_handle: &AppHandle,
+) -> anyhow::Result<Option<tauri_plugin_updater::Update>> {
     let updater = app_handle
         .updater()
         .map_err(|e| anyhow::anyhow!("Failed to get updater: {}", e))?;
@@ -131,7 +150,9 @@ async fn check_for_updates(app_handle: &AppHandle) -> anyhow::Result<Option<taur
 
 /// Send a system notification about an update
 fn send_update_notification(app_handle: &AppHandle, title: &str, body: &str) {
-    if let Err(e) = app_handle.notification().builder()
+    if let Err(e) = app_handle
+        .notification()
+        .builder()
         .title(title)
         .body(body)
         .show()
@@ -185,7 +206,10 @@ async fn spawn_auto_update_check(app_handle: AppHandle) {
                 send_update_notification(
                     &app_handle,
                     "Update available",
-                    &format!("Version {} is available. Open Settings → About to install.", update.version),
+                    &format!(
+                        "Version {} is available. Open Settings → About to install.",
+                        update.version
+                    ),
                 );
             }
         }
@@ -240,8 +264,15 @@ async fn shutdown() {
 
 fn setup_tray(app: &tauri::App) -> anyhow::Result<()> {
     let show_i = MenuItem::with_id(app, "show", t!("show").as_ref(), true, None::<&str>)?;
-    let add_drive_i = MenuItem::with_id(app, "add_drive", t!("addNewDrive").as_ref(), true, None::<&str>)?;
-    let settings_i = MenuItem::with_id(app, "settings", t!("settings").as_ref(), true, None::<&str>)?;
+    let add_drive_i = MenuItem::with_id(
+        app,
+        "add_drive",
+        t!("addNewDrive").as_ref(),
+        true,
+        None::<&str>,
+    )?;
+    let settings_i =
+        MenuItem::with_id(app, "settings", t!("settings").as_ref(), true, None::<&str>)?;
     let quit_i = MenuItem::with_id(app, "quit", t!("quit").as_ref(), true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show_i, &add_drive_i, &settings_i, &quit_i])?;
 

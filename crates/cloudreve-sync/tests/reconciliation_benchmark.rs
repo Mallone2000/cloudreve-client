@@ -7,7 +7,10 @@ use common::{TestEnv, remote_file};
 use serde_json::json;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use wiremock::{Mock, ResponseTemplate, matchers::{method, path}};
+use wiremock::{
+    Mock, ResponseTemplate,
+    matchers::{method, path},
+};
 
 #[cfg(unix)]
 fn peak_rss_kib() -> u64 {
@@ -16,7 +19,11 @@ fn peak_rss_kib() -> u64 {
         return 0;
     }
     let peak = unsafe { usage.assume_init() }.ru_maxrss as u64;
-    if cfg!(target_os = "macos") { peak / 1024 } else { peak }
+    if cfg!(target_os = "macos") {
+        peak / 1024
+    } else {
+        peak
+    }
 }
 
 async fn recovery_fixture(files: usize) {
@@ -55,10 +62,19 @@ async fn recovery_fixture(files: usize) {
     let elapsed = started.elapsed();
     let db_connection_checkouts = env.inventory.connection_checkouts() - before_operations;
     let peak_memory_kib = peak_rss_kib();
-    println!("reconciliation_benchmark files={files} scan_ms={} db_connection_checkouts={db_connection_checkouts} process_peak_rss_kib={peak_memory_kib}", elapsed.as_millis());
-    assert!(env.all_tasks().is_empty(), "unchanged recovery fixture should enqueue no transfers");
+    println!(
+        "reconciliation_benchmark files={files} scan_ms={} db_connection_checkouts={db_connection_checkouts} process_peak_rss_kib={peak_memory_kib}",
+        elapsed.as_millis()
+    );
+    assert!(
+        env.all_tasks().is_empty(),
+        "unchanged recovery fixture should enqueue no transfers"
+    );
     if files == 10_000 {
-        assert!(elapsed < Duration::from_secs(300), "10,000-file recovery exceeded five minutes");
+        assert!(
+            elapsed < Duration::from_secs(300),
+            "10,000-file recovery exceeded five minutes"
+        );
     }
 }
 

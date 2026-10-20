@@ -8,8 +8,8 @@
 
 mod common;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use cloudreve_sync::drive::remote_events::run_remote_event_loop;
@@ -144,7 +144,8 @@ async fn stalled_sse_connection_triggers_reconnect() {
                     let body = r#"{"code":0,"msg":"","data":{"files":[],"pagination":{"page":1,"page_size":500,"total_items":0},"props":{"max_page_size":10000}}}"#;
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                        body.len(), body
+                        body.len(),
+                        body
                     );
                     let _ = socket.write_all(resp.as_bytes()).await;
                 } else {
@@ -185,9 +186,7 @@ async fn stalled_sse_connection_triggers_reconnect() {
     };
 
     let mount = Arc::new(Mount::new(config, inventory, manager_tx, notifier).await);
-    mount
-        .sse_idle_timeout_secs
-        .store(2, Ordering::Relaxed);
+    mount.sse_idle_timeout_secs.store(2, Ordering::Relaxed);
     mount.spawn_command_processor(mount.clone()).await;
     tokio::spawn(run_remote_event_loop(mount));
 

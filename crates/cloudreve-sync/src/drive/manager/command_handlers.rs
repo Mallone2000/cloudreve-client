@@ -82,9 +82,13 @@ impl DriveManager {
             .context("Failed to query file metadata")?;
 
         let config = mount.get_config().await;
-        let uri = local_path_to_cr_uri(path.clone(), config.sync_path.clone(), config.remote_path.clone())
-            .context("failed to convert local path to uri")?
-            .to_string();
+        let uri = local_path_to_cr_uri(
+            path.clone(),
+            config.sync_path.clone(),
+            config.remote_path.clone(),
+        )
+        .context("failed to convert local path to uri")?
+        .to_string();
 
         let url = match file_meta {
             None => view_online_url(&config.remote_path, None, &config)?,

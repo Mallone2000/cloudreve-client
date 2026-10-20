@@ -64,7 +64,9 @@ async fn an_empty_but_present_sync_folder_still_syncs() {
     env.set_remote_files(vec![remote_file("remote.txt", 4, "etag-r")])
         .await;
 
-    env.full_sync().await.expect("an empty sync folder is legitimate");
+    env.full_sync()
+        .await
+        .expect("an empty sync folder is legitimate");
 
     assert_eq!(
         env.tasks_of_type("download").len(),

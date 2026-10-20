@@ -13,7 +13,10 @@ mod common;
 use cloudreve_sync::inventory::ConflictState;
 use common::{TestEnv, remote_file};
 use serde_json::json;
-use wiremock::{Mock, ResponseTemplate, matchers::{method, path}};
+use wiremock::{
+    Mock, ResponseTemplate,
+    matchers::{method, path},
+};
 
 // ---------------------------------------------------------------------------
 // Initial sync
@@ -78,7 +81,8 @@ async fn mock_collision_download(env: &TestEnv, name: &str, content: Vec<u8>, et
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "code": 0, "msg": "", "data": remote_file(name, content.len() as i64, etag),
         })))
-        .mount(&env.server).await;
+        .mount(&env.server)
+        .await;
     Mock::given(method("POST"))
         .and(path("/api/v4/file/url"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -87,17 +91,23 @@ async fn mock_collision_download(env: &TestEnv, name: &str, content: Vec<u8>, et
                 "expires": "2099-01-01T00:00:00Z",
             },
         })))
-        .mount(&env.server).await;
+        .mount(&env.server)
+        .await;
     Mock::given(method("GET"))
         .and(path(format!("/blob/{name}")))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(content))
-        .mount(&env.server).await;
+        .mount(&env.server)
+        .await;
 }
 
 async fn wait_for_verification(env: &TestEnv) {
     for _ in 0..100 {
         if env.tasks_of_type("verify_collision").iter().any(|task| {
-            matches!(task.status, cloudreve_sync::inventory::TaskStatus::Completed | cloudreve_sync::inventory::TaskStatus::Failed)
+            matches!(
+                task.status,
+                cloudreve_sync::inventory::TaskStatus::Completed
+                    | cloudreve_sync::inventory::TaskStatus::Failed
+            )
         }) {
             return;
         }
@@ -110,13 +120,17 @@ async fn wait_for_verification(env: &TestEnv) {
 async fn unequal_same_size_collision_becomes_a_conflict() {
     let env = TestEnv::new().await;
     env.write_local("same.txt", b"local");
-    env.set_remote_files(vec![remote_file("same.txt", 5, "etag-remote")]).await;
+    env.set_remote_files(vec![remote_file("same.txt", 5, "etag-remote")])
+        .await;
     mock_collision_download(&env, "same.txt", b"other".to_vec(), "etag-remote").await;
 
     env.full_sync().await.unwrap();
     wait_for_verification(&env).await;
 
-    assert_eq!(env.db_entry("same.txt").unwrap().conflict_state, Some(ConflictState::Pending));
+    assert_eq!(
+        env.db_entry("same.txt").unwrap().conflict_state,
+        Some(ConflictState::Pending)
+    );
     assert_eq!(std::fs::read(env.local_path("same.txt")).unwrap(), b"local");
     assert!(env.tasks_of_type("upload").is_empty());
     assert!(env.tasks_of_type("download").is_empty());
@@ -142,7 +156,10 @@ async fn local_edit_is_uploaded() {
     assert_eq!(env.tasks_of_type("upload").len(), 1);
     assert!(env.tasks_of_type("download").is_empty());
     let entry = env.db_entry("todo.txt").unwrap();
-    assert!(entry.conflict_state.is_none(), "one-sided edit is not a conflict");
+    assert!(
+        entry.conflict_state.is_none(),
+        "one-sided edit is not a conflict"
+    );
 }
 
 /// The user edits a synced file locally WITHOUT changing its size
@@ -246,7 +263,10 @@ async fn conflicted_file_stays_frozen_across_syncs() {
     env.full_sync().await.unwrap();
     env.full_sync().await.unwrap();
 
-    assert!(env.all_tasks().is_empty(), "frozen file must never transfer");
+    assert!(
+        env.all_tasks().is_empty(),
+        "frozen file must never transfer"
+    );
     assert_eq!(
         env.db_entry("budget.xlsx").unwrap().conflict_state,
         Some(ConflictState::Pending)

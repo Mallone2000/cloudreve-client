@@ -7,9 +7,9 @@ pub use types::*;
 use crate::drive::commands::{ManagerCommand, MountCommand};
 use crate::drive::heartbeat::HeartbeatManager;
 use crate::drive::mounts::{Credentials, DriveConfig, Mount};
-use crate::{EventBroadcaster, SummaryNotifier};
 use crate::inventory::InventoryDb;
 use crate::tasks::TaskProgress;
+use crate::{EventBroadcaster, SummaryNotifier};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -70,7 +70,15 @@ mod http_consent_tests {
         assert_eq!(manager.pending_http.read().await.len(), 1);
         assert!(manager.list_drives().await[0].transport_consent_required);
         assert!(server.received_requests().await.unwrap().is_empty());
-        assert_eq!(serde_json::from_str::<DriveState>(&std::fs::read_to_string(temp.path().join("drives.json")).unwrap()).unwrap().drives.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<DriveState>(
+                &std::fs::read_to_string(temp.path().join("drives.json")).unwrap()
+            )
+            .unwrap()
+            .drives
+            .len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -91,10 +99,12 @@ mod http_consent_tests {
             drives,
             pending_http: Arc::new(RwLock::new(HashMap::new())),
             config_dir: temp.path().to_path_buf(),
-            inventory: inventory.clone(), command_tx: command_tx.clone(),
+            inventory: inventory.clone(),
+            command_tx: command_tx.clone(),
             command_rx: Arc::new(Mutex::new(Some(command_rx))),
             processor_handle: Arc::new(Mutex::new(None)),
-            event_broadcaster: broadcaster, summary_notifier: notifier.clone(),
+            event_broadcaster: broadcaster,
+            summary_notifier: notifier.clone(),
         };
         let drive_id = uuid::Uuid::new_v4();
         let config = DriveConfig {
@@ -106,7 +116,11 @@ mod http_consent_tests {
             ..Default::default()
         };
         let mount = Arc::new(Mount::new(config, inventory.clone(), command_tx, notifier).await);
-        manager.drives.write().await.insert(drive_id.to_string(), mount);
+        manager
+            .drives
+            .write()
+            .await
+            .insert(drive_id.to_string(), mount);
 
         for (name, choice, expected) in [
             ("local.txt", ConflictResolution::KeepLocal, "upload"),
@@ -116,11 +130,24 @@ mod http_consent_tests {
             let path = sync_root.join(name);
             std::fs::write(&path, b"local").unwrap();
             let path_string = path.to_str().unwrap();
-            inventory.upsert(&MetadataEntry::new(drive_id, path_string, false).with_size(5)).unwrap();
-            inventory.mark_as_conflicted(path_string, Some(ConflictState::Pending)).unwrap();
-            manager.resolve_conflict(&drive_id.to_string(), path_string, choice).await.unwrap();
-            let tasks = inventory.list_tasks(Some(&drive_id.to_string()), None).unwrap();
-            assert!(tasks.iter().any(|task| task.local_path == path_string && task.task_type == expected));
+            inventory
+                .upsert(&MetadataEntry::new(drive_id, path_string, false).with_size(5))
+                .unwrap();
+            inventory
+                .mark_as_conflicted(path_string, Some(ConflictState::Pending))
+                .unwrap();
+            manager
+                .resolve_conflict(&drive_id.to_string(), path_string, choice)
+                .await
+                .unwrap();
+            let tasks = inventory
+                .list_tasks(Some(&drive_id.to_string()), None)
+                .unwrap();
+            assert!(
+                tasks
+                    .iter()
+                    .any(|task| task.local_path == path_string && task.task_type == expected)
+            );
             if matches!(choice, ConflictResolution::KeepBoth) {
                 assert!(tasks.iter().any(|task| task.task_type == "upload"
                     && task.local_path.contains("both (conflicted copy ")));
@@ -293,8 +320,10 @@ impl DriveManager {
             _ => anyhow::bail!("Only HTTP and HTTPS Cloudreve sites are supported"),
         }
         // Fetch favicon if icon_path is not set or doesn't exist
-        let cached_icon_is_safe = |path: &Option<String>| path.as_ref()
-            .is_some_and(|value| favicon::cached_icon_is_safe(value));
+        let cached_icon_is_safe = |path: &Option<String>| {
+            path.as_ref()
+                .is_some_and(|value| favicon::cached_icon_is_safe(value))
+        };
         if !cached_icon_is_safe(&config.icon_path) || !cached_icon_is_safe(&config.raw_icon_path) {
             match favicon::fetch_and_save_favicon(&config.instance_url).await {
                 Ok(result) => {
@@ -439,22 +468,37 @@ impl DriveManager {
         for mount in read_guard.values() {
             result.push(DriveSummary::from(&mount.get_config().await));
         }
-        result.extend(self.pending_http.read().await.values().map(DriveSummary::from));
+        result.extend(
+            self.pending_http
+                .read()
+                .await
+                .values()
+                .map(DriveSummary::from),
+        );
         result
     }
 
     pub async fn set_insecure_http_consent(&self, id: &str, allow: bool) -> Result<()> {
         if allow {
-            let mut config = self.pending_http.write().await.remove(id)
+            let mut config = self
+                .pending_http
+                .write()
+                .await
+                .remove(id)
                 .ok_or_else(|| anyhow::anyhow!("Drive is not awaiting HTTP consent"))?;
             config.allow_insecure_http = true;
             if let Err(error) = self.add_drive(config.clone()).await {
                 config.allow_insecure_http = false;
-                self.pending_http.write().await.insert(id.to_string(), config);
+                self.pending_http
+                    .write()
+                    .await
+                    .insert(id.to_string(), config);
                 return Err(error);
             }
         } else {
-            let mount = self.get_drive(id).await
+            let mount = self
+                .get_drive(id)
+                .await
                 .ok_or_else(|| anyhow::anyhow!("Drive is not active"))?;
             let config = mount.get_config().await;
             if !url::Url::parse(&config.instance_url).is_ok_and(|url| url.scheme() == "http") {
@@ -466,7 +510,10 @@ impl DriveManager {
             mount.shutdown().await;
             let mut config = mount.get_config().await;
             config.allow_insecure_http = false;
-            self.pending_http.write().await.insert(id.to_string(), config);
+            self.pending_http
+                .write()
+                .await
+                .insert(id.to_string(), config);
             self.heartbeat_manager.start().await;
         }
         self.summary_notifier.notify();
@@ -516,7 +563,10 @@ impl DriveManager {
         }
         if let Some(mut config) = self.pending_http.write().await.remove(id) {
             if config.user_id != user_id {
-                self.pending_http.write().await.insert(id.to_string(), config);
+                self.pending_http
+                    .write()
+                    .await
+                    .insert(id.to_string(), config);
                 anyhow::bail!("User ID does not match the existing drive");
             }
             config.name = name;
@@ -524,7 +574,10 @@ impl DriveManager {
             config.credentials = credentials;
             config.allow_insecure_http = allow_insecure_http;
             if let Err(error) = self.add_drive(config.clone()).await {
-                self.pending_http.write().await.insert(id.to_string(), config);
+                self.pending_http
+                    .write()
+                    .await
+                    .insert(id.to_string(), config);
                 return Err(error);
             }
             return Ok(());
@@ -784,7 +837,8 @@ impl DriveManager {
                 inventory.query_conflicts(filter.as_deref())?,
             ))
         })
-        .await.context("Status inventory query panicked")??;
+        .await
+        .context("Status inventory query panicked")??;
 
         // Collect running task progress from all task queues
         // Build a map of task_id -> TaskProgress for quick lookup
@@ -812,7 +866,10 @@ impl DriveManager {
             .into_iter()
             .map(|task| {
                 let progress = progress_map.remove(&task.id);
-                TaskWithProgress { task, live_progress: progress }
+                TaskWithProgress {
+                    task,
+                    live_progress: progress,
+                }
             })
             .collect();
 
@@ -915,10 +972,16 @@ impl DriveManager {
             ConflictResolution::KeepBoth => {
                 if path.exists() {
                     let copy_path = conflicted_copy_path(&path);
-                    let safe_copy = crate::drive::utils::SafeSyncPath::from_local(&copy_path, &sync_root)?;
-                    safe_path.rename_checked(&sync_root, &safe_copy).with_context(|| {
-                        format!("Failed to rename conflicted file to {}", copy_path.display())
-                    })?;
+                    let safe_copy =
+                        crate::drive::utils::SafeSyncPath::from_local(&copy_path, &sync_root)?;
+                    safe_path
+                        .rename_checked(&sync_root, &safe_copy)
+                        .with_context(|| {
+                            format!(
+                                "Failed to rename conflicted file to {}",
+                                copy_path.display()
+                            )
+                        })?;
                     mount
                         .task_queue
                         .enqueue(TaskPayload::upload(copy_path))
@@ -1051,7 +1114,11 @@ fn conflicted_copy_path(path: &std::path::Path) -> PathBuf {
 impl DriveManager {
     /// Get capacity summary from a mount's drive props.
     /// Only returns capacity if the remote_path filesystem is "my".
-    fn get_capacity_summary(mount: &Mount, drive_id: &str, remote_path: &str) -> Option<CapacitySummary> {
+    fn get_capacity_summary(
+        mount: &Mount,
+        drive_id: &str,
+        remote_path: &str,
+    ) -> Option<CapacitySummary> {
         // Only show capacity for "my" filesystem
         use cloudreve_api::models::uri::CrUri;
         let is_my_fs = CrUri::new(remote_path)
@@ -1087,7 +1154,6 @@ impl DriveManager {
             }
         }
     }
-
 }
 
 #[cfg(test)]

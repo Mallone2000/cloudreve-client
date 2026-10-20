@@ -63,11 +63,16 @@ impl RamDisk {
             .output()
             .ok()?;
         if !format.status.success() {
-            let _ = Command::new("hdiutil").args(["detach", "-force", &device]).output();
+            let _ = Command::new("hdiutil")
+                .args(["detach", "-force", &device])
+                .output();
             return None;
         }
 
-        Some(Self { device, mount_point: PathBuf::from(format!("/Volumes/{label}")) })
+        Some(Self {
+            device,
+            mount_point: PathBuf::from(format!("/Volumes/{label}")),
+        })
     }
 }
 
@@ -200,7 +205,8 @@ impl TestEnv {
         let config = self.mount.get_config().await;
         let (manager_tx, manager_rx) = mpsc::unbounded_channel();
         let notifier = Arc::new(SummaryNotifier::new(Arc::new(EventBroadcaster::new(16))));
-        self.mount = Arc::new(Mount::new(config, self.inventory.clone(), manager_tx, notifier).await);
+        self.mount =
+            Arc::new(Mount::new(config, self.inventory.clone(), manager_tx, notifier).await);
         self._manager_rx = manager_rx;
     }
 
@@ -242,7 +248,9 @@ impl TestEnv {
         .with_etag(etag)
         .with_size(meta.len() as i64)
         .with_local_mtime(mtime);
-        self.inventory.upsert(&entry).expect("upsert inventory entry");
+        self.inventory
+            .upsert(&entry)
+            .expect("upsert inventory entry");
     }
 
     /// All task records ever enqueued for this drive (any status).

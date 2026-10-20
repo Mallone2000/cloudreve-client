@@ -18,13 +18,13 @@ use notify_debouncer_full::notify::event::{CreateKind, EventKind, ModifyKind};
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
-use uuid::Uuid;
 use url::Url;
+use uuid::Uuid;
 
 use crate::{
     drive::{event_blocker::EventBlocker, utils::local_path_to_cr_uri},
     events::SummaryNotifier,
-    inventory::{local_mtime_secs, ConflictState, FileMetadata, InventoryDb, MetadataEntry},
+    inventory::{ConflictState, FileMetadata, InventoryDb, MetadataEntry, local_mtime_secs},
     tasks::queue::QueuedTask,
     utils::{disk_space, toast::send_conflict_toast},
 };
@@ -121,7 +121,11 @@ impl InMemoryDownloadProgressReporter {
         progress_map: Arc<DashMap<String, TaskProgress>>,
         notifier: Arc<SummaryNotifier>,
     ) -> Self {
-        Self { task_id, progress_map, notifier }
+        Self {
+            task_id,
+            progress_map,
+            notifier,
+        }
     }
 
     pub fn on_progress(&self, update: &DownloadProgressUpdate) {
@@ -206,7 +210,10 @@ impl<'a> DownloadTask<'a> {
 
         // Get inventory metadata if available
         let path_str = local_path.to_str().context("invalid path")?;
-        self.inventory_meta = self.inventory.query_by_path(path_str).context("failed to query inventory")?;
+        self.inventory_meta = self
+            .inventory
+            .query_by_path(path_str)
+            .context("failed to query inventory")?;
 
         self.download_file().await
     }
@@ -216,12 +223,17 @@ impl<'a> DownloadTask<'a> {
         info!(target: "tasks::download", task_id = %self.task.task_id, path = %local_path.display(), "Starting download");
 
         // Compute remote URI
-        let uri = local_path_to_cr_uri(local_path.clone(), self.sync_path.clone(), self.remote_base.clone())
-            .context("failed to compute remote URI")?
-            .to_string();
+        let uri = local_path_to_cr_uri(
+            local_path.clone(),
+            self.sync_path.clone(),
+            self.remote_base.clone(),
+        )
+        .context("failed to compute remote URI")?
+        .to_string();
 
         // Get remote file info
-        let file_info = match self.cr_client
+        let file_info = match self
+            .cr_client
             .get_file_info(&cloudreve_api::models::explorer::GetFileInfoService {
                 uri: Some(uri.clone()),
                 id: None,
@@ -231,8 +243,9 @@ impl<'a> DownloadTask<'a> {
             .await
         {
             Ok(info) => info,
-            Err(cloudreve_api::ApiError::ApiError { code, message: _, .. }) 
-                if code == 40016 || code == 404 => {
+            Err(cloudreve_api::ApiError::ApiError {
+                code, message: _, ..
+            }) if code == 40016 || code == 404 => {
                 // A stale download must never delete a local copy. The next
                 // reconciliation will forget its inventory row if remote is gone.
                 info!(
@@ -267,14 +280,14 @@ impl<'a> DownloadTask<'a> {
         // the file is already in sync — skip the download to avoid a needless
         // re-download that would generate FS events and trigger a re-upload loop.
         if !self.task.payload.force_override {
-        if let Some(ref meta) = self.inventory_meta {
-            if let Some(ref remote_etag) = file_info.primary_entity {
-                if !meta.etag.is_empty() && meta.etag == *remote_etag {
-                    debug!(target: "tasks::download", task_id = %self.task.task_id, path = %local_path.display(), "Local file already matches remote etag, skipping download");
-                    return Ok(());
+            if let Some(ref meta) = self.inventory_meta {
+                if let Some(ref remote_etag) = file_info.primary_entity {
+                    if !meta.etag.is_empty() && meta.etag == *remote_etag {
+                        debug!(target: "tasks::download", task_id = %self.task.task_id, path = %local_path.display(), "Local file already matches remote etag, skipping download");
+                        return Ok(());
+                    }
                 }
             }
-        }
         }
 
         // Conflict guard: this is the single choke point for every download
@@ -294,7 +307,10 @@ impl<'a> DownloadTask<'a> {
                         "Conflict detected: local file modified while remote also changed"
                     );
                     if let Some(path_str) = local_path.to_str() {
-                        if let Err(e) = self.inventory.mark_as_conflicted(path_str, Some(ConflictState::Pending)) {
+                        if let Err(e) = self
+                            .inventory
+                            .mark_as_conflicted(path_str, Some(ConflictState::Pending))
+                        {
                             warn!(target: "tasks::download", error = ?e, "Failed to mark conflict");
                         }
                     }
@@ -326,11 +342,19 @@ impl<'a> DownloadTask<'a> {
         // Get download URL
         let mut request = FileURLService::default();
         request.uris.push(uri.clone());
-        if let Some(entity) = self.remote_file_info.as_ref().and_then(|f| f.primary_entity.clone()) {
+        if let Some(entity) = self
+            .remote_file_info
+            .as_ref()
+            .and_then(|f| f.primary_entity.clone())
+        {
             request.entity = Some(entity);
         }
 
-        let url_res = self.cr_client.get_file_url(&request).await.context("failed to get download URL")?;
+        let url_res = self
+            .cr_client
+            .get_file_url(&request)
+            .await
+            .context("failed to get download URL")?;
         let download_url = {
             let raw = url_res.urls.first().context("no download URL")?.url.clone();
             // Correct only a server's loopback SiteURL. A storage provider or
@@ -341,7 +365,8 @@ impl<'a> DownloadTask<'a> {
         validate_download_url(&download_url, &self.approved_http_origin)?;
         debug!(target: "tasks::download", task_id = %self.task.task_id, size = file_size, "Got download URL");
 
-        let destination = crate::drive::utils::SafeSyncPath::from_local(&local_path, &self.sync_path)?;
+        let destination =
+            crate::drive::utils::SafeSyncPath::from_local(&local_path, &self.sync_path)?;
         destination.join_checked(&self.sync_path)?;
 
         // Stage the download next to its destination rather than in the system
@@ -364,7 +389,9 @@ impl<'a> DownloadTask<'a> {
             Arc::clone(&self.notifier),
         );
 
-        let result = self.download_to_temp(&download_url, &temp_path, tracker.clone(), &reporter).await;
+        let result = self
+            .download_to_temp(&download_url, &temp_path, tracker.clone(), &reporter)
+            .await;
 
         match result {
             Ok(()) => {
@@ -373,16 +400,27 @@ impl<'a> DownloadTask<'a> {
                 // macOS FSEvents can emit an unpredictable number of Create/Modify events
                 // per rename, so we use a time-based block (5 s) instead of a fixed count.
                 let block_duration = Duration::from_secs(5);
-                self.event_blocker.register_for_duration(&EventKind::Create(CreateKind::Any), local_path.clone(), block_duration);
-                self.event_blocker.register_for_duration(&EventKind::Modify(ModifyKind::Any), local_path.clone(), block_duration);
+                self.event_blocker.register_for_duration(
+                    &EventKind::Create(CreateKind::Any),
+                    local_path.clone(),
+                    block_duration,
+                );
+                self.event_blocker.register_for_duration(
+                    &EventKind::Modify(ModifyKind::Any),
+                    local_path.clone(),
+                    block_duration,
+                );
                 // Atomic move temp → final path
-                staged.rename_checked(&self.sync_path, &destination)
+                staged
+                    .rename_checked(&self.sync_path, &destination)
                     .context("failed to move downloaded file")?;
                 info!(target: "tasks::download", task_id = %self.task.task_id, path = %local_path.display(), "Download complete");
                 // Update inventory so 3-way sync knows this file was last synced now
                 if let Some(file_info) = &self.remote_file_info {
                     let parse_ts = |s: &str| -> i64 {
-                        chrono::DateTime::parse_from_rfc3339(s).map(|dt| dt.timestamp()).unwrap_or(0)
+                        chrono::DateTime::parse_from_rfc3339(s)
+                            .map(|dt| dt.timestamp())
+                            .unwrap_or(0)
                     };
                     if let Ok(drive_uuid) = Uuid::parse_str(self.drive_id) {
                         let path_str = local_path.to_str().unwrap_or("");
@@ -413,8 +451,13 @@ impl<'a> DownloadTask<'a> {
         tracker: Arc<DownloadProgressTracker>,
         reporter: &InMemoryDownloadProgressReporter,
     ) -> Result<()> {
-        let response = self.download_client.get(url).send().await
-            .map_err(reqwest::Error::without_url).context("Download request failed")?;
+        let response = self
+            .download_client
+            .get(url)
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .context("Download request failed")?;
 
         if !response.status().is_success() {
             anyhow::bail!("Download failed with status: {}", response.status());
@@ -423,7 +466,8 @@ impl<'a> DownloadTask<'a> {
         let staged = crate::drive::utils::SafeSyncPath::from_local(temp_path, &self.sync_path)?;
         let root = self.sync_path.clone();
         let file = tokio::task::spawn_blocking(move || staged.create_new_checked(&root))
-            .await.context("staged file open task panicked")??;
+            .await
+            .context("staged file open task panicked")??;
         let mut file = tokio::fs::File::from_std(file);
         let mut stream = response.bytes_stream();
         let mut last_report = Instant::now();
@@ -433,9 +477,12 @@ impl<'a> DownloadTask<'a> {
             if self.cancel_token.is_cancelled() {
                 anyhow::bail!("Download cancelled");
             }
-            let chunk = chunk_result.map_err(reqwest::Error::without_url)
+            let chunk = chunk_result
+                .map_err(reqwest::Error::without_url)
                 .context("Failed to read download chunk")?;
-            file.write_all(&chunk).await.context("failed to write chunk")?;
+            file.write_all(&chunk)
+                .await
+                .context("failed to write chunk")?;
             tracker.add_bytes(chunk.len() as u64);
             if last_report.elapsed() >= REPORT_INTERVAL {
                 reporter.on_progress(&tracker.create_update());
@@ -446,7 +493,6 @@ impl<'a> DownloadTask<'a> {
         file.flush().await.context("failed to flush temp file")?;
         Ok(())
     }
-
 }
 
 pub(crate) fn validate_download_url(raw: &str, approved_http_origin: &Option<Url>) -> Result<()> {
@@ -454,17 +500,27 @@ pub(crate) fn validate_download_url(raw: &str, approved_http_origin: &Option<Url
     if url.scheme() == "https" {
         return Ok(());
     }
-    if url.scheme() == "http" && approved_http_origin.as_ref().is_some_and(|allowed| url.origin() == allowed.origin()) {
+    if url.scheme() == "http"
+        && approved_http_origin
+            .as_ref()
+            .is_some_and(|allowed| url.origin() == allowed.origin())
+    {
         return Ok(());
     }
     anyhow::bail!("Signed download URL uses an unapproved insecure origin")
 }
 
-pub(crate) fn allowed_download_redirect(initial: &Url, next: &Url, approved_http_origin: &Option<Url>) -> bool {
+pub(crate) fn allowed_download_redirect(
+    initial: &Url,
+    next: &Url,
+    approved_http_origin: &Option<Url>,
+) -> bool {
     initial.origin() == next.origin()
         && (next.scheme() == "https"
-            || (next.scheme() == "http" && approved_http_origin.as_ref()
-                .is_some_and(|allowed| next.origin() == allowed.origin())))
+            || (next.scheme() == "http"
+                && approved_http_origin
+                    .as_ref()
+                    .is_some_and(|allowed| next.origin() == allowed.origin())))
 }
 
 #[cfg(test)]
@@ -475,22 +531,45 @@ mod url_policy_tests {
     async fn reqwest_errors_do_not_expose_signed_query_values() {
         let error = reqwest::Client::new()
             .get("http://127.0.0.1:0/download?signature=SIGNED_SENTINEL")
-            .send().await.unwrap_err().without_url();
+            .send()
+            .await
+            .unwrap_err()
+            .without_url();
         assert!(!format!("{error:?}").contains("SIGNED_SENTINEL"));
     }
 
     #[test]
     fn signed_cdn_https_is_allowed_but_insecure_cross_origin_is_rejected() {
         let approved = Some(Url::parse("http://cloud.example:5212").unwrap());
-        assert!(validate_download_url("https://cdn.example.net/file?signature=abc", &approved).is_ok());
+        assert!(
+            validate_download_url("https://cdn.example.net/file?signature=abc", &approved).is_ok()
+        );
         assert!(validate_download_url("http://cloud.example:5212/file", &approved).is_ok());
-        assert!(validate_download_url("http://cdn.example.net/file?signature=abc", &approved).is_err());
+        assert!(
+            validate_download_url("http://cdn.example.net/file?signature=abc", &approved).is_err()
+        );
         assert!(validate_download_url("file:///tmp/secret", &approved).is_err());
         let signed = Url::parse("https://cdn.example.net/file?signature=abc").unwrap();
-        assert!(allowed_download_redirect(&signed, &Url::parse("https://cdn.example.net/next").unwrap(), &approved));
-        assert!(!allowed_download_redirect(&signed, &Url::parse("https://other.example.net/next").unwrap(), &approved));
-        assert!(!allowed_download_redirect(&signed, &Url::parse("http://cdn.example.net/next").unwrap(), &approved));
+        assert!(allowed_download_redirect(
+            &signed,
+            &Url::parse("https://cdn.example.net/next").unwrap(),
+            &approved
+        ));
+        assert!(!allowed_download_redirect(
+            &signed,
+            &Url::parse("https://other.example.net/next").unwrap(),
+            &approved
+        ));
+        assert!(!allowed_download_redirect(
+            &signed,
+            &Url::parse("http://cdn.example.net/next").unwrap(),
+            &approved
+        ));
         let insecure = Url::parse("http://cloud.example:5212/file").unwrap();
-        assert!(allowed_download_redirect(&insecure, &Url::parse("http://cloud.example:5212/next").unwrap(), &approved));
+        assert!(allowed_download_redirect(
+            &insecure,
+            &Url::parse("http://cloud.example:5212/next").unwrap(),
+            &approved
+        ));
     }
 }

@@ -2,8 +2,8 @@ use crate::AppStateHandle;
 use chrono::{Duration, Utc};
 use cloudreve_api::api::UserApi;
 use cloudreve_sync::{
-    config::LogLevel, ConfigManager, ConflictResolution, Credentials, DriveConfig, DriveInfo, DriveSummary,
-    StatusSummary,
+    config::LogLevel, ConfigManager, ConflictResolution, Credentials, DriveConfig, DriveInfo,
+    DriveSummary, StatusSummary,
 };
 #[cfg(target_os = "macos")]
 use tauri::TitleBarStyle;
@@ -35,10 +35,7 @@ fn safe_move_window(window: &impl Manager<tauri::Wry>, label: &str, position: Po
 }
 
 /// Same as safe_move_window but operates on an already-obtained Window reference.
-fn safe_move_window_direct(
-    window: &tauri::WebviewWindow<tauri::Wry>,
-    position: Position,
-) {
+fn safe_move_window_direct(window: &tauri::WebviewWindow<tauri::Wry>, position: Position) {
     let pos_str = format!("{:?}", position);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = window.move_window(position);
@@ -82,7 +79,9 @@ pub async fn is_dir_empty(path: String) -> CommandResult<bool> {
 
 #[tauri::command]
 pub async fn list_drives(state: State<'_, AppStateHandle>) -> CommandResult<Vec<DriveSummary>> {
-    let app_state = state.get().ok_or_else(|| "App not yet initialized".to_string())?;
+    let app_state = state
+        .get()
+        .ok_or_else(|| "App not yet initialized".to_string())?;
     Ok(app_state.drive_manager.list_drives().await)
 }
 
@@ -112,7 +111,8 @@ pub(crate) async fn add_drive_with_tokens(
 
     let now = Utc::now();
     let access_expires = (now + Duration::seconds(config.access_token_expires as i64)).to_rfc3339();
-    let refresh_expires = (now + Duration::seconds(config.refresh_token_expires as i64)).to_rfc3339();
+    let refresh_expires =
+        (now + Duration::seconds(config.refresh_token_expires as i64)).to_rfc3339();
 
     let credentials = Credentials {
         access_token: Some(config.access_token),
@@ -122,11 +122,23 @@ pub(crate) async fn add_drive_with_tokens(
     };
 
     if let Some(drive_id) = config.drive_id {
-        app_state.drive_manager
-            .update_drive_credentials(&drive_id, config.drive_name, config.site_url, credentials, &config.user_id, config.allow_insecure_http)
+        app_state
+            .drive_manager
+            .update_drive_credentials(
+                &drive_id,
+                config.drive_name,
+                config.site_url,
+                credentials,
+                &config.user_id,
+                config.allow_insecure_http,
+            )
             .await
             .map_err(|e| e.to_string())?;
-        app_state.drive_manager.persist().await.map_err(|e| e.to_string())?;
+        app_state
+            .drive_manager
+            .persist()
+            .await
+            .map_err(|e| e.to_string())?;
         return Ok(drive_id);
     }
 
@@ -150,8 +162,16 @@ pub(crate) async fn add_drive_with_tokens(
         extra: Default::default(),
     };
 
-    let id = app_state.drive_manager.add_drive(drive_config).await.map_err(|e| e.to_string())?;
-    app_state.drive_manager.persist().await.map_err(|e| e.to_string())?;
+    let id = app_state
+        .drive_manager
+        .add_drive(drive_config)
+        .await
+        .map_err(|e| e.to_string())?;
+    app_state
+        .drive_manager
+        .persist()
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(id)
 }
 
@@ -160,9 +180,19 @@ pub async fn remove_drive(
     state: State<'_, AppStateHandle>,
     drive_id: String,
 ) -> CommandResult<bool> {
-    let app_state = state.get().ok_or_else(|| "App not yet initialized".to_string())?;
-    let result = app_state.drive_manager.remove_drive(&drive_id).await.map_err(|e| e.to_string())?;
-    app_state.drive_manager.persist().await.map_err(|e| e.to_string())?;
+    let app_state = state
+        .get()
+        .ok_or_else(|| "App not yet initialized".to_string())?;
+    let result = app_state
+        .drive_manager
+        .remove_drive(&drive_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    app_state
+        .drive_manager
+        .persist()
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(result)
 }
 
@@ -172,9 +202,19 @@ pub async fn set_insecure_http_consent(
     drive_id: String,
     allow: bool,
 ) -> CommandResult<()> {
-    let app_state = state.get().ok_or_else(|| "App not yet initialized".to_string())?;
-    app_state.drive_manager.set_insecure_http_consent(&drive_id, allow).await.map_err(|e| e.to_string())?;
-    app_state.drive_manager.persist().await.map_err(|e| e.to_string())
+    let app_state = state
+        .get()
+        .ok_or_else(|| "App not yet initialized".to_string())?;
+    app_state
+        .drive_manager
+        .set_insecure_http_consent(&drive_id, allow)
+        .await
+        .map_err(|e| e.to_string())?;
+    app_state
+        .drive_manager
+        .persist()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -182,8 +222,14 @@ pub async fn get_ignore_patterns(
     state: State<'_, AppStateHandle>,
     drive_id: String,
 ) -> CommandResult<Vec<String>> {
-    let app_state = state.get().ok_or_else(|| "App not yet initialized".to_string())?;
-    app_state.drive_manager.get_ignore_patterns(&drive_id).await.map_err(|e| e.to_string())
+    let app_state = state
+        .get()
+        .ok_or_else(|| "App not yet initialized".to_string())?;
+    app_state
+        .drive_manager
+        .get_ignore_patterns(&drive_id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// The junk patterns applied to every drive on top of the user's own list.
@@ -200,9 +246,19 @@ pub async fn set_ignore_patterns(
     drive_id: String,
     patterns: Vec<String>,
 ) -> CommandResult<()> {
-    let app_state = state.get().ok_or_else(|| "App not yet initialized".to_string())?;
-    app_state.drive_manager.update_ignore_patterns(&drive_id, patterns).await.map_err(|e| e.to_string())?;
-    app_state.drive_manager.persist().await.map_err(|e| e.to_string())?;
+    let app_state = state
+        .get()
+        .ok_or_else(|| "App not yet initialized".to_string())?;
+    app_state
+        .drive_manager
+        .update_ignore_patterns(&drive_id, patterns)
+        .await
+        .map_err(|e| e.to_string())?;
+    app_state
+        .drive_manager
+        .persist()
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -211,8 +267,14 @@ pub async fn get_drive_max_file_size(
     state: State<'_, AppStateHandle>,
     drive_id: String,
 ) -> CommandResult<u64> {
-    let app_state = state.get().ok_or_else(|| "App not yet initialized".to_string())?;
-    app_state.drive_manager.get_drive_max_file_size(&drive_id).await.map_err(|e| e.to_string())
+    let app_state = state
+        .get()
+        .ok_or_else(|| "App not yet initialized".to_string())?;
+    app_state
+        .drive_manager
+        .get_drive_max_file_size(&drive_id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -221,8 +283,14 @@ pub async fn set_drive_max_file_size(
     drive_id: String,
     max_mb: u64,
 ) -> CommandResult<()> {
-    let app_state = state.get().ok_or_else(|| "App not yet initialized".to_string())?;
-    app_state.drive_manager.set_drive_max_file_size(&drive_id, max_mb).await.map_err(|e| e.to_string())
+    let app_state = state
+        .get()
+        .ok_or_else(|| "App not yet initialized".to_string())?;
+    app_state
+        .drive_manager
+        .set_drive_max_file_size(&drive_id, max_mb)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -230,8 +298,14 @@ pub async fn get_sync_status(
     state: State<'_, AppStateHandle>,
     drive_id: String,
 ) -> CommandResult<serde_json::Value> {
-    let app_state = state.get().ok_or_else(|| "App not yet initialized".to_string())?;
-    app_state.drive_manager.get_sync_status(&drive_id).await.map_err(|e| e.to_string())
+    let app_state = state
+        .get()
+        .ok_or_else(|| "App not yet initialized".to_string())?;
+    app_state
+        .drive_manager
+        .get_sync_status(&drive_id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -239,8 +313,14 @@ pub async fn get_status_summary(
     state: State<'_, AppStateHandle>,
     drive_id: Option<String>,
 ) -> CommandResult<StatusSummary> {
-    let app_state = state.get().ok_or_else(|| "App not yet initialized".to_string())?;
-    app_state.drive_manager.get_status_summary(drive_id.as_deref()).await.map_err(|e| e.to_string())
+    let app_state = state
+        .get()
+        .ok_or_else(|| "App not yet initialized".to_string())?;
+    app_state
+        .drive_manager
+        .get_status_summary(drive_id.as_deref())
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -250,7 +330,9 @@ pub async fn resolve_conflict(
     local_path: String,
     resolution: ConflictResolution,
 ) -> CommandResult<()> {
-    let app_state = state.get().ok_or_else(|| "App not yet initialized".to_string())?;
+    let app_state = state
+        .get()
+        .ok_or_else(|| "App not yet initialized".to_string())?;
     app_state
         .drive_manager
         .resolve_conflict(&drive_id, &local_path, resolution)
@@ -260,26 +342,38 @@ pub async fn resolve_conflict(
 
 #[tauri::command]
 pub async fn get_drives_info(state: State<'_, AppStateHandle>) -> CommandResult<Vec<DriveInfo>> {
-    let app_state = state.get().ok_or_else(|| "App not yet initialized".to_string())?;
-    app_state.drive_manager.get_drives_info().await.map_err(|e| e.to_string())
+    let app_state = state
+        .get()
+        .ok_or_else(|| "App not yet initialized".to_string())?;
+    app_state
+        .drive_manager
+        .get_drives_info()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn pause_sync(
-    state: State<'_, AppStateHandle>,
-    drive_id: String,
-) -> CommandResult<()> {
-    let app_state = state.get().ok_or_else(|| "App not yet initialized".to_string())?;
-    app_state.drive_manager.pause_drive(&drive_id).await.map_err(|e| e.to_string())
+pub async fn pause_sync(state: State<'_, AppStateHandle>, drive_id: String) -> CommandResult<()> {
+    let app_state = state
+        .get()
+        .ok_or_else(|| "App not yet initialized".to_string())?;
+    app_state
+        .drive_manager
+        .pause_drive(&drive_id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn resume_sync(
-    state: State<'_, AppStateHandle>,
-    drive_id: String,
-) -> CommandResult<()> {
-    let app_state = state.get().ok_or_else(|| "App not yet initialized".to_string())?;
-    app_state.drive_manager.resume_drive(&drive_id).await.map_err(|e| e.to_string())
+pub async fn resume_sync(state: State<'_, AppStateHandle>, drive_id: String) -> CommandResult<()> {
+    let app_state = state
+        .get()
+        .ok_or_else(|| "App not yet initialized".to_string())?;
+    app_state
+        .drive_manager
+        .resume_drive(&drive_id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 pub fn show_main_window(app: &AppHandle) {
@@ -303,15 +397,19 @@ fn show_main_window_at_position(app: &AppHandle, position: Position) {
         return;
     }
 
-    match WebviewWindowBuilder::new(app, "main_popup", WebviewUrl::App(get_url_with_lang("index.html/#/popup").into()))
-        .title("Cloudreve")
-        .inner_size(370.0, 530.0)
-        .resizable(false)
-        .visible(false)
-        .decorations(false)
-        .skip_taskbar(true)
-        .minimizable(false)
-        .build()
+    match WebviewWindowBuilder::new(
+        app,
+        "main_popup",
+        WebviewUrl::App(get_url_with_lang("index.html/#/popup").into()),
+    )
+    .title("Cloudreve")
+    .inner_size(370.0, 530.0)
+    .resizable(false)
+    .visible(false)
+    .decorations(false)
+    .skip_taskbar(true)
+    .minimizable(false)
+    .build()
     {
         Ok(window) => {
             let window_clone = window.clone();
@@ -357,13 +455,25 @@ pub async fn show_reauthorize_window(
 }
 
 pub fn show_add_drive_window_impl(app: &AppHandle) {
-    show_drive_window_internal(app, "Add Drive", &get_url_with_lang("index.html/#/add-drive"));
+    show_drive_window_internal(
+        app,
+        "Add Drive",
+        &get_url_with_lang("index.html/#/add-drive"),
+    );
 }
 
-pub fn show_reauthorize_window_impl(app: &AppHandle, drive_id: &str, site_url: &str, drive_name: &str) {
+pub fn show_reauthorize_window_impl(
+    app: &AppHandle,
+    drive_id: &str,
+    site_url: &str,
+    drive_name: &str,
+) {
     let encoded_site_url = urlencoding::encode(site_url);
     let encoded_drive_name = urlencoding::encode(drive_name);
-    let url_path = format!("index.html/#/reauthorize/{}/{}/{}", drive_id, encoded_site_url, encoded_drive_name);
+    let url_path = format!(
+        "index.html/#/reauthorize/{}/{}/{}",
+        drive_id, encoded_site_url, encoded_drive_name
+    );
     show_drive_window_internal(app, "Reauthorize Drive", &get_url_with_lang(&url_path));
 }
 
@@ -423,14 +533,18 @@ pub fn show_settings_window_impl(app: &AppHandle) {
         return;
     }
 
-    let builder = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App(get_url_with_lang("index.html/#/settings").into()))
-        .title("Settings")
-        .inner_size(700.0, 500.0)
-        .min_inner_size(600.0, 400.0)
-        .visible(false)
-        .resizable(true)
-        .decorations(false)
-        .minimizable(true);
+    let builder = WebviewWindowBuilder::new(
+        app,
+        "settings",
+        WebviewUrl::App(get_url_with_lang("index.html/#/settings").into()),
+    )
+    .title("Settings")
+    .inner_size(700.0, 500.0)
+    .min_inner_size(600.0, 400.0)
+    .visible(false)
+    .resizable(true)
+    .decorations(false)
+    .minimizable(true);
 
     #[cfg(target_os = "macos")]
     let builder = builder
@@ -463,16 +577,24 @@ pub async fn get_auto_start_enabled(app: AppHandle) -> CommandResult<bool> {
 pub async fn set_auto_start(app: AppHandle, enabled: bool) -> CommandResult<bool> {
     let autolaunch = app.autolaunch();
     if enabled {
-        autolaunch.enable().map_err(|e| format!("Failed to enable autostart: {}", e))?;
+        autolaunch
+            .enable()
+            .map_err(|e| format!("Failed to enable autostart: {}", e))?;
     } else {
-        autolaunch.disable().map_err(|e| format!("Failed to disable autostart: {}", e))?;
+        autolaunch
+            .disable()
+            .map_err(|e| format!("Failed to disable autostart: {}", e))?;
     }
-    autolaunch.is_enabled().map_err(|e| format!("Failed to verify autostart: {}", e))
+    autolaunch
+        .is_enabled()
+        .map_err(|e| format!("Failed to verify autostart: {}", e))
 }
 
 #[tauri::command]
 pub async fn set_notify_credential_expired(enabled: bool) -> CommandResult<()> {
-    ConfigManager::get().set_notify_credential_expired(enabled).map_err(|e| e.to_string())
+    ConfigManager::get()
+        .set_notify_credential_expired(enabled)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -492,12 +614,16 @@ pub async fn open_folder_and_close_window(app: AppHandle, path: String, label: S
 
 #[tauri::command]
 pub async fn set_notify_file_conflict(enabled: bool) -> CommandResult<()> {
-    ConfigManager::get().set_notify_file_conflict(enabled).map_err(|e| e.to_string())
+    ConfigManager::get()
+        .set_notify_file_conflict(enabled)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn set_fast_popup_launch(enabled: bool) -> CommandResult<()> {
-    ConfigManager::get().set_fast_popup_launch(enabled).map_err(|e| e.to_string())
+    ConfigManager::get()
+        .set_fast_popup_launch(enabled)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -535,30 +661,41 @@ pub struct GeneralSettings {
 
 #[tauri::command]
 pub async fn set_heartbeat_interval(secs: u64) -> CommandResult<()> {
-    ConfigManager::get().set_heartbeat_interval_secs(secs).map_err(|e| e.to_string())
+    ConfigManager::get()
+        .set_heartbeat_interval_secs(secs)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn set_log_to_file(enabled: bool) -> CommandResult<()> {
-    ConfigManager::get().set_log_to_file(enabled).map_err(|e| e.to_string())
+    ConfigManager::get()
+        .set_log_to_file(enabled)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn set_log_level(level: String) -> CommandResult<()> {
     let log_level = LogLevel::from_str(&level);
-    ConfigManager::get().set_log_level(log_level).map_err(|e| e.to_string())
+    ConfigManager::get()
+        .set_log_level(log_level)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn set_log_max_files(max_files: usize) -> CommandResult<()> {
-    ConfigManager::get().set_log_max_files(max_files).map_err(|e| e.to_string())
+    ConfigManager::get()
+        .set_log_max_files(max_files)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn set_language(app: AppHandle, language: Option<String>) -> CommandResult<()> {
-    ConfigManager::get().set_language(language.clone()).map_err(|e| e.to_string())?;
+    ConfigManager::get()
+        .set_language(language.clone())
+        .map_err(|e| e.to_string())?;
 
-    let locale = language.unwrap_or_else(|| sys_locale::get_locale().unwrap_or_else(|| String::from("en-US")));
+    let locale = language
+        .unwrap_or_else(|| sys_locale::get_locale().unwrap_or_else(|| String::from("en-US")));
     rust_i18n::set_locale(&locale);
 
     if let Some(window) = app.get_webview_window("main_popup") {
@@ -600,16 +737,31 @@ pub struct UserProfile {
 }
 
 #[tauri::command]
-pub async fn get_user_profile(state: State<'_, AppStateHandle>) -> CommandResult<Option<UserProfile>> {
-    let app_state = state.get().ok_or_else(|| "App not yet initialized".to_string())?;
-    let drives = app_state.drive_manager.get_drives_info().await.map_err(|e| e.to_string())?;
+pub async fn get_user_profile(
+    state: State<'_, AppStateHandle>,
+) -> CommandResult<Option<UserProfile>> {
+    let app_state = state
+        .get()
+        .ok_or_else(|| "App not yet initialized".to_string())?;
+    let drives = app_state
+        .drive_manager
+        .get_drives_info()
+        .await
+        .map_err(|e| e.to_string())?;
     let first = match drives.first() {
         Some(d) => d,
         None => return Ok(None),
     };
-    let mount = app_state.drive_manager.get_drive(&first.id).await
+    let mount = app_state
+        .drive_manager
+        .get_drive(&first.id)
+        .await
         .ok_or_else(|| "Drive not found".to_string())?;
-    let user = mount.cr_client.get_user_me().await.map_err(|e| e.to_string())?;
+    let user = mount
+        .cr_client
+        .get_user_me()
+        .await
+        .map_err(|e| e.to_string())?;
     let avatar_url = format!("{}/api/v4/user/avatar/{}", first.instance_url, user.id);
     let profile_url = format!("{}/profile/{}", first.instance_url, user.id);
     Ok(Some(UserProfile {

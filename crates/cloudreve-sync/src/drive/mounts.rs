@@ -13,11 +13,7 @@ use cloudreve_api::{Client, ClientConfig, models::user::Token};
 use notify_debouncer_full::notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, new_debouncer};
 use std::time::Duration;
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::spawn;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio::task::JoinHandle;
@@ -184,7 +180,11 @@ impl Mount {
             .load_tokens(&Token {
                 access_token: config.credentials.access_token.clone().unwrap_or_default(),
                 refresh_token: config.credentials.refresh_token.clone(),
-                access_expires: config.credentials.access_expires.clone().unwrap_or_default(),
+                access_expires: config
+                    .credentials
+                    .access_expires
+                    .clone()
+                    .unwrap_or_default(),
                 refresh_expires: config.credentials.refresh_expires.clone(),
             })
             .await;
@@ -227,7 +227,8 @@ impl Mount {
             config.allow_insecure_http,
             summary_notifier,
             &ignore_matcher,
-        ).await;
+        )
+        .await;
         let id = config.id.clone();
 
         Mount {
@@ -263,8 +264,9 @@ impl Mount {
 
         // Ensure the local sync directory exists
         if !sync_path.exists() {
-            std::fs::create_dir_all(&sync_path)
-                .with_context(|| format!("Failed to create sync directory: {}", sync_path.display()))?;
+            std::fs::create_dir_all(&sync_path).with_context(|| {
+                format!("Failed to create sync directory: {}", sync_path.display())
+            })?;
             tracing::info!(target: "drive::mounts", path = %sync_path.display(), "Created sync directory");
         }
 
@@ -287,27 +289,28 @@ impl Mount {
         let watcher = new_debouncer(
             Duration::from_secs(2),
             None,
-            move |result: DebounceEventResult| {
-                match result {
-                    Ok(events) => {
-                        let events: Vec<_> = events
-                            .into_iter()
-                            .filter(|e| !event_blocker.should_block(&e.kind, e.paths.first().unwrap_or(&PathBuf::new())))
-                            .collect();
-                        if events.is_empty() {
-                            return;
-                        }
-                        let grouped = group_fs_events(events);
-                        let _ = command_tx.send(MountCommand::Sync {
-                            local_paths: grouped.all_paths(),
-                            mode: crate::drive::sync::SyncMode::LocalChanged,
-                            user_initiated: false,
-                        });
+            move |result: DebounceEventResult| match result {
+                Ok(events) => {
+                    let events: Vec<_> = events
+                        .into_iter()
+                        .filter(|e| {
+                            !event_blocker
+                                .should_block(&e.kind, e.paths.first().unwrap_or(&PathBuf::new()))
+                        })
+                        .collect();
+                    if events.is_empty() {
+                        return;
                     }
-                    Err(errors) => {
-                        for e in errors {
-                            tracing::error!(target: "drive::mounts", error = ?e, "Filesystem watcher error");
-                        }
+                    let grouped = group_fs_events(events);
+                    let _ = command_tx.send(MountCommand::Sync {
+                        local_paths: grouped.all_paths(),
+                        mode: crate::drive::sync::SyncMode::LocalChanged,
+                        user_initiated: false,
+                    });
+                }
+                Err(errors) => {
+                    for e in errors {
+                        tracing::error!(target: "drive::mounts", error = ?e, "Filesystem watcher error");
                     }
                 }
             },
@@ -332,22 +335,24 @@ impl Mount {
         }
     }
 
-    async fn process_commands(
-        self: &Arc<Self>,
-        mut rx: mpsc::UnboundedReceiver<MountCommand>,
-    ) {
+    async fn process_commands(self: &Arc<Self>, mut rx: mpsc::UnboundedReceiver<MountCommand>) {
         tracing::info!(target: "drive::mounts", id = %self.id, "Command processor started");
 
         while let Some(command) = rx.recv().await {
             tracing::trace!(target: "drive::mounts", command = ?command, "Processing command");
             let mount = self.clone();
             match command {
-                MountCommand::Sync { local_paths, mode, user_initiated } => {
+                MountCommand::Sync {
+                    local_paths,
+                    mode,
+                    user_initiated,
+                } => {
                     let mut tasks = self.sync_tasks.lock().await;
                     tasks.retain(|handle| !handle.is_finished());
                     tasks.push(spawn(async move {
                         let _lock = mount.sync_lock.lock().await;
-                        if let Err(e) = mount.perform_sync(local_paths, mode, user_initiated).await {
+                        if let Err(e) = mount.perform_sync(local_paths, mode, user_initiated).await
+                        {
                             tracing::error!(target: "drive::mounts", error = %e, "Sync failed");
                         }
                     }));
@@ -635,7 +640,8 @@ impl Mount {
     /// sync, props refresh, FS watcher), and cancels running tasks.
     /// The command processor stays alive so it can process Resume.
     pub async fn pause(&self) {
-        self.paused.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.paused
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         tracing::info!(target: "drive::mounts", id = %self.id, "Drive paused");
 
         // Stop FS watcher
@@ -653,13 +659,15 @@ impl Mount {
     /// Resume sync: clears the flag. Callers (DriveManager) are responsible
     /// for restarting background workers and triggering a full sync.
     pub async fn resume(&self) {
-        self.paused.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.paused
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         tracing::info!(target: "drive::mounts", id = %self.id, "Drive resumed");
     }
 
     pub async fn shutdown(&self) {
         tracing::info!(target: "drive::mounts", id = %self.id, "Shutting down mount");
-        self.paused.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.paused
+            .store(true, std::sync::atomic::Ordering::Relaxed);
 
         // Stop fs watcher
         *self.fs_watcher.lock().await = None;
@@ -674,8 +682,12 @@ impl Mount {
 
     async fn abort_sync_tasks(&self) {
         let handles: Vec<_> = self.sync_tasks.lock().await.drain(..).collect();
-        for handle in &handles { handle.abort(); }
-        for handle in handles { let _ = handle.await; }
+        for handle in &handles {
+            handle.abort();
+        }
+        for handle in handles {
+            let _ = handle.await;
+        }
     }
 
     async fn abort_background_tasks(&self, include_processor: bool) {
@@ -694,8 +706,12 @@ impl Mount {
         if let Some(handle) = self.props_refresh_handle.lock().await.take() {
             handles.push(handle);
         }
-        for handle in &handles { handle.abort(); }
-        for handle in handles { let _ = handle.await; }
+        for handle in &handles {
+            handle.abort();
+        }
+        for handle in handles {
+            let _ = handle.await;
+        }
     }
 
     pub async fn delete(&self) -> Result<()> {
@@ -711,4 +727,3 @@ impl Mount {
         Ok(None)
     }
 }
-

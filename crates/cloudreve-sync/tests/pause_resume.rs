@@ -3,13 +3,14 @@
 
 mod common;
 
-use common::{remote_file, TestEnv};
+use common::{TestEnv, remote_file};
 
 /// A paused drive must ignore full sync commands — no downloads enqueued.
 #[tokio::test]
 async fn paused_drive_ignores_full_sync() {
     let env = TestEnv::new().await;
-    env.set_remote_files(vec![remote_file("hello.txt", 5, "etag-1")]).await;
+    env.set_remote_files(vec![remote_file("hello.txt", 5, "etag-1")])
+        .await;
 
     // Pause the drive
     env.mount.pause().await;
@@ -27,7 +28,8 @@ async fn paused_drive_ignores_full_sync() {
 #[tokio::test]
 async fn resumed_drive_syncs_normally() {
     let env = TestEnv::new().await;
-    env.set_remote_files(vec![remote_file("hello.txt", 5, "etag-1")]).await;
+    env.set_remote_files(vec![remote_file("hello.txt", 5, "etag-1")])
+        .await;
 
     // Pause then resume
     env.mount.pause().await;
@@ -46,7 +48,8 @@ async fn resumed_drive_syncs_normally() {
 #[tokio::test]
 async fn pause_is_idempotent() {
     let env = TestEnv::new().await;
-    env.set_remote_files(vec![remote_file("hello.txt", 5, "etag-1")]).await;
+    env.set_remote_files(vec![remote_file("hello.txt", 5, "etag-1")])
+        .await;
 
     env.mount.pause().await;
     env.mount.pause().await; // second pause must not panic
@@ -62,11 +65,12 @@ async fn pause_is_idempotent() {
 /// ignored by the command processor.
 #[tokio::test]
 async fn paused_drive_ignores_full_sync_command() {
-    use std::time::Duration;
     use cloudreve_sync::drive::commands::MountCommand;
+    use std::time::Duration;
 
     let env = TestEnv::new().await;
-    env.set_remote_files(vec![remote_file("doc.txt", 10, "etag-cmd")]).await;
+    env.set_remote_files(vec![remote_file("doc.txt", 10, "etag-cmd")])
+        .await;
 
     // Start the command processor
     let mount = env.mount.clone();
@@ -155,7 +159,8 @@ async fn starting_the_sse_worker_twice_leaves_only_one_running() {
     let later = sse_requests().await;
 
     assert_eq!(
-        later, after_pause,
+        later,
+        after_pause,
         "an orphaned SSE worker survived: the endpoint was polled {} more times \
          after the drive was paused",
         later - after_pause
@@ -170,8 +175,14 @@ async fn is_paused_reflects_state() {
     assert!(!env.mount.is_paused(), "new mount should not be paused");
 
     env.mount.pause().await;
-    assert!(env.mount.is_paused(), "mount should be paused after pause()");
+    assert!(
+        env.mount.is_paused(),
+        "mount should be paused after pause()"
+    );
 
     env.mount.resume().await;
-    assert!(!env.mount.is_paused(), "mount should not be paused after resume()");
+    assert!(
+        !env.mount.is_paused(),
+        "mount should not be paused after resume()"
+    );
 }

@@ -26,7 +26,10 @@ struct Throttle {
 
 impl Throttle {
     fn new(interval: Duration) -> Self {
-        Self { interval, last_fired: Mutex::new(HashMap::new()) }
+        Self {
+            interval,
+            last_fired: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Whether the caller may fire for `key` now. Records the time when it
@@ -76,7 +79,10 @@ pub fn send_skipped_symlink_toast(root: &std::path::Path, path: &std::path::Path
     if SYMLINK_THROTTLE.allow(&key) {
         push_notification(
             "Symlink skipped",
-            format!("Sync skipped {} because it is a symlink. Other symlinks under this drive are also skipped.", path.display()),
+            format!(
+                "Sync skipped {} because it is a symlink. Other symlinks under this drive are also skipped.",
+                path.display()
+            ),
         );
     }
 }

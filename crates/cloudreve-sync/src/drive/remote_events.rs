@@ -4,12 +4,7 @@ use cloudreve_api::{
     api::explorer::FileEventsApi,
     models::explorer::{FileEvent, FileEventData, FileEventType},
 };
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
 const INITIAL_BACKOFF_SECS: u64 = 1;
 // Cap low enough that the client recovers quickly once the server is back:
@@ -152,7 +147,8 @@ impl Mount {
         };
 
         let idle_timeout = Duration::from_secs(
-            self.sse_idle_timeout_secs.load(std::sync::atomic::Ordering::Relaxed),
+            self.sse_idle_timeout_secs
+                .load(std::sync::atomic::Ordering::Relaxed),
         );
 
         loop {
@@ -237,7 +233,8 @@ impl Mount {
         }
 
         if !create_update.is_empty() {
-            self.handle_create_update_events(sync_root.clone(), create_update).await?;
+            self.handle_create_update_events(sync_root.clone(), create_update)
+                .await?;
         }
         if !delete.is_empty() {
             self.handle_delete_events(sync_root.clone(), delete).await?;
@@ -249,13 +246,18 @@ impl Mount {
         Ok(())
     }
 
-    async fn handle_rename_events(&self, sync_root: PathBuf, events: Vec<FileEventData>) -> Result<()> {
+    async fn handle_rename_events(
+        &self,
+        sync_root: PathBuf,
+        events: Vec<FileEventData>,
+    ) -> Result<()> {
         let mut from_grouped: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
         let mut to_grouped: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
 
         for event in events {
             let local_from = match SafeSyncPath::from_event_path(&event.from)
-                .and_then(|rel| rel.join_checked(&sync_root)) {
+                .and_then(|rel| rel.join_checked(&sync_root))
+            {
                 Ok(path) => path,
                 Err(error) => {
                     tracing::warn!(target: "drive::remote_events", error = %error, "Unsafe rename source skipped");
@@ -264,7 +266,10 @@ impl Mount {
             };
             if local_from.exists() {
                 if let Some(parent) = local_from.parent() {
-                    from_grouped.entry(parent.to_path_buf()).or_default().push(local_from.clone());
+                    from_grouped
+                        .entry(parent.to_path_buf())
+                        .or_default()
+                        .push(local_from.clone());
                 }
             }
 
@@ -279,7 +284,8 @@ impl Mount {
             }
 
             let local_to = match SafeSyncPath::from_event_path(&event.to)
-                .and_then(|rel| rel.join_checked(&sync_root)) {
+                .and_then(|rel| rel.join_checked(&sync_root))
+            {
                 Ok(path) => path,
                 Err(error) => {
                     tracing::warn!(target: "drive::remote_events", error = %error, "Unsafe rename destination skipped");
@@ -287,7 +293,10 @@ impl Mount {
                 }
             };
             if let Some(parent) = local_to.parent() {
-                to_grouped.entry(parent.to_path_buf()).or_default().push(local_to);
+                to_grouped
+                    .entry(parent.to_path_buf())
+                    .or_default()
+                    .push(local_to);
             }
         }
 
@@ -297,11 +306,16 @@ impl Mount {
         Ok(())
     }
 
-    async fn handle_delete_events(&self, sync_root: PathBuf, events: Vec<FileEventData>) -> Result<()> {
+    async fn handle_delete_events(
+        &self,
+        sync_root: PathBuf,
+        events: Vec<FileEventData>,
+    ) -> Result<()> {
         let mut grouped: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
         for event in events {
             let local_path = match SafeSyncPath::from_event_path(&event.from)
-                .and_then(|rel| rel.join_checked(&sync_root)) {
+                .and_then(|rel| rel.join_checked(&sync_root))
+            {
                 Ok(path) => path,
                 Err(error) => {
                     tracing::warn!(target: "drive::remote_events", error = %error, "Unsafe delete event skipped");
@@ -310,7 +324,10 @@ impl Mount {
             };
             if local_path.exists() {
                 if let Some(parent) = local_path.parent() {
-                    grouped.entry(parent.to_path_buf()).or_default().push(local_path);
+                    grouped
+                        .entry(parent.to_path_buf())
+                        .or_default()
+                        .push(local_path);
                 }
             }
         }
@@ -320,11 +337,16 @@ impl Mount {
         Ok(())
     }
 
-    async fn handle_create_update_events(&self, sync_root: PathBuf, events: Vec<FileEventData>) -> Result<()> {
+    async fn handle_create_update_events(
+        &self,
+        sync_root: PathBuf,
+        events: Vec<FileEventData>,
+    ) -> Result<()> {
         let mut grouped: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
         for event in events {
             let local_path = match SafeSyncPath::from_event_path(&event.from)
-                .and_then(|rel| rel.join_checked(&sync_root)) {
+                .and_then(|rel| rel.join_checked(&sync_root))
+            {
                 Ok(path) => path,
                 Err(error) => {
                     tracing::warn!(target: "drive::remote_events", error = %error, "Unsafe create/update event skipped");
@@ -332,7 +354,10 @@ impl Mount {
                 }
             };
             if let Some(parent) = local_path.parent() {
-                grouped.entry(parent.to_path_buf()).or_default().push(local_path);
+                grouped
+                    .entry(parent.to_path_buf())
+                    .or_default()
+                    .push(local_path);
             }
         }
         for (parent, paths) in grouped {

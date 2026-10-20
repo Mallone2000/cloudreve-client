@@ -16,20 +16,27 @@ impl InventoryDb {
             let mut inserted = Vec::with_capacity(tasks.len());
             for task in tasks {
                 if task.task_type == "download" {
-                    if let Some(etag) = task.custom_state.as_ref()
+                    if let Some(etag) = task
+                        .custom_state
+                        .as_ref()
                         .and_then(|state| state.get("remote_etag"))
-                        .and_then(|value| value.as_str()) {
+                        .and_then(|value| value.as_str())
+                    {
                         let latest: Option<TaskRow> = task_queue_dsl::task_queue
                             .filter(task_queue_dsl::drive_id.eq(&task.drive_id))
                             .filter(task_queue_dsl::task_type.eq(&task.task_type))
                             .filter(task_queue_dsl::local_path.eq(&task.local_path))
                             .order(task_queue_dsl::created_at.desc())
-                            .first(tx).optional()?;
+                            .first(tx)
+                            .optional()?;
                         if let Some(previous) = latest.map(TaskRecord::try_from).transpose()? {
-                            let previous_etag = previous.custom_state.as_ref()
+                            let previous_etag = previous
+                                .custom_state
+                                .as_ref()
                                 .and_then(|state| state.get("remote_etag"))
                                 .and_then(|value| value.as_str());
-                            if previous.status == TaskStatus::Failed && previous_etag == Some(etag) {
+                            if previous.status == TaskStatus::Failed && previous_etag == Some(etag)
+                            {
                                 inserted.push(false);
                                 continue;
                             }
@@ -40,9 +47,13 @@ impl InventoryDb {
                     .filter(task_queue_dsl::drive_id.eq(&task.drive_id))
                     .filter(task_queue_dsl::task_type.eq(&task.task_type))
                     .filter(task_queue_dsl::local_path.eq(&task.local_path))
-                    .filter(task_queue_dsl::status.eq_any([TaskStatus::Pending.as_str(), TaskStatus::Running.as_str()]))
+                    .filter(
+                        task_queue_dsl::status
+                            .eq_any([TaskStatus::Pending.as_str(), TaskStatus::Running.as_str()]),
+                    )
                     .select(task_queue_dsl::id)
-                    .first(tx).optional()?;
+                    .first(tx)
+                    .optional()?;
                 if active.is_some() {
                     inserted.push(false);
                     continue;

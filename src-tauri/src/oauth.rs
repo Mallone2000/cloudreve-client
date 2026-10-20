@@ -1,9 +1,12 @@
 //! OAuth state and token exchange stay in Rust. The shared registration secret
 //! remains extractable from a desktop binary; PKCE protects the authorization code.
 
-use std::{collections::HashMap, time::{Duration, Instant}};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -11,13 +14,17 @@ use tokio::sync::Mutex;
 use url::Url;
 use uuid::Uuid;
 
-use crate::{AppStateHandle, commands::{AddDriveArgs, add_drive_with_tokens}};
+use crate::{
+    commands::{add_drive_with_tokens, AddDriveArgs},
+    AppStateHandle,
+};
 
 const CLIENT_ID: &str = "393a1839-f52e-498e-9972-e77cc2241eee";
 // Compatibility credential required by Cloudreve's current token endpoint.
 // A native-app bundle cannot keep this value confidential.
 const CLIENT_SECRET: &str = "8GaQIu3lOSdqYoDHi9cR8IZ4pvuMH8ya";
-const SCOPES: &str = "profile email openid offline_access UserInfo.Write Workflow.Write Files.Write Shares.Write";
+const SCOPES: &str =
+    "profile email openid offline_access UserInfo.Write Workflow.Write Files.Write Shares.Write";
 const CALLBACK_PATH: &str = "/callback/desktop";
 const SESSION_TTL: Duration = Duration::from_secs(600);
 
@@ -93,13 +100,22 @@ fn http_client() -> Result<reqwest::Client, String> {
         .map_err(|_| "Failed to initialize site connection".into())
 }
 
-async fn small_json<T: serde::de::DeserializeOwned>(mut response: reqwest::Response) -> Result<T, String> {
+async fn small_json<T: serde::de::DeserializeOwned>(
+    mut response: reqwest::Response,
+) -> Result<T, String> {
     const LIMIT: usize = 1024 * 1024;
-    if response.content_length().is_some_and(|size| size > LIMIT as u64) {
+    if response
+        .content_length()
+        .is_some_and(|size| size > LIMIT as u64)
+    {
         return Err("Authorization response is too large".into());
     }
     let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|_| "Cannot read authorization response")? {
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| "Cannot read authorization response")?
+    {
         if chunk.len() > LIMIT.saturating_sub(body.len()) {
             return Err("Authorization response is too large".into());
         }
@@ -110,7 +126,10 @@ async fn small_json<T: serde::de::DeserializeOwned>(mut response: reqwest::Respo
 
 fn version_supported(version: &str) -> bool {
     let parse = |s: &str| -> Option<Vec<u32>> {
-        s.trim_end_matches("-pro").split('.').map(|part| part.parse().ok()).collect()
+        s.trim_end_matches("-pro")
+            .split('.')
+            .map(|part| part.parse().ok())
+            .collect()
     };
     parse(version).is_some_and(|parts| {
         let mut parts = parts;
@@ -127,8 +146,14 @@ pub async fn begin_oauth(
 ) -> Result<BeginOAuthResult, String> {
     let site = normalise_site(&site_url, allow_insecure_http)?;
     let client = http_client()?;
-    let ping_url = site.join("/api/v4/site/ping").map_err(|_| "Invalid site URL")?;
-    let response = client.get(ping_url).send().await.map_err(|_| "Cannot reach Cloudreve site")?;
+    let ping_url = site
+        .join("/api/v4/site/ping")
+        .map_err(|_| "Invalid site URL")?;
+    let response = client
+        .get(ping_url)
+        .send()
+        .await
+        .map_err(|_| "Cannot reach Cloudreve site")?;
     if !response.status().is_success() {
         return Err(format!("Site ping failed: HTTP {}", response.status()));
     }
@@ -137,14 +162,19 @@ pub async fn begin_oauth(
         return Err(format!("Cloudreve ping failed: {}", ping.msg));
     }
     if !version_supported(&ping.data) {
-        return Err(format!("Cloudreve 4.12.0 or later is required (found {})", ping.data));
+        return Err(format!(
+            "Cloudreve 4.12.0 or later is required (found {})",
+            ping.data
+        ));
     }
 
     let session_id = Uuid::new_v4().to_string();
     let state = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let verifier = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-    let mut auth = site.join("/session/authorize").map_err(|_| "Invalid authorization URL")?;
+    let mut auth = site
+        .join("/session/authorize")
+        .map_err(|_| "Invalid authorization URL")?;
     auth.query_pairs_mut()
         .append_pair("response_type", "code")
         .append_pair("client_id", CLIENT_ID)
@@ -156,44 +186,79 @@ pub async fn begin_oauth(
 
     let mut sessions = manager.sessions.lock().await;
     sessions.retain(|_, session| session.started.elapsed() < SESSION_TTL);
-    sessions.insert(session_id.clone(), OAuthSession {
-        site_url: site.origin().ascii_serialization(),
-        state,
-        verifier,
-        started: Instant::now(),
-        allow_insecure_http,
-        callback: None,
-    });
-    Ok(BeginOAuthResult { session_id, authorize_url: auth.to_string(), site_version: ping.data })
+    sessions.insert(
+        session_id.clone(),
+        OAuthSession {
+            site_url: site.origin().ascii_serialization(),
+            state,
+            verifier,
+            started: Instant::now(),
+            allow_insecure_http,
+            callback: None,
+        },
+    );
+    Ok(BeginOAuthResult {
+        session_id,
+        authorize_url: auth.to_string(),
+        site_version: ping.data,
+    })
 }
 
 pub async fn handle_callback(app: AppHandle, raw: String) {
-    let Some(manager) = app.try_state::<OAuthManager>() else { return; };
+    let Some(manager) = app.try_state::<OAuthManager>() else {
+        return;
+    };
     let mut sessions = manager.sessions.lock().await;
-    let Some(notice) = accept_callback(&mut sessions, &raw) else { return; };
+    let Some(notice) = accept_callback(&mut sessions, &raw) else {
+        return;
+    };
     drop(sessions);
     let _ = app.emit("oauth-callback", notice);
 }
 
-fn accept_callback(sessions: &mut HashMap<String, OAuthSession>, raw: &str) -> Option<CallbackNotice> {
+fn accept_callback(
+    sessions: &mut HashMap<String, OAuthSession>,
+    raw: &str,
+) -> Option<CallbackNotice> {
     let url = Url::parse(raw).ok()?;
-    if url.scheme() != "cloudreve" || url.host_str() != Some("callback")
-        || url.path() != "/desktop" || url.username() != "" || url.password().is_some()
-        || url.port().is_some() || url.fragment().is_some() {
+    if url.scheme() != "cloudreve"
+        || url.host_str() != Some("callback")
+        || url.path() != "/desktop"
+        || url.username() != ""
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.fragment().is_some()
+    {
         return None;
     }
     let unique = |key: &str| {
         let mut values = url.query_pairs().filter(|(name, _)| name == key);
         let value = values.next()?.1.into_owned();
-        if values.next().is_some() { None } else { Some(value) }
+        if values.next().is_some() {
+            None
+        } else {
+            Some(value)
+        }
     };
-    let (Some(state), Some(code)) = (unique("state"), unique("code")) else { return None; };
-    if state.is_empty() || code.is_empty() { return None; }
-    let Some((session_id, session)) = sessions.iter_mut().find(|(_, session)| session.state == state) else { return None; };
+    let (Some(state), Some(code)) = (unique("state"), unique("code")) else {
+        return None;
+    };
+    if state.is_empty() || code.is_empty() {
+        return None;
+    }
+    let Some((session_id, session)) = sessions
+        .iter_mut()
+        .find(|(_, session)| session.state == state)
+    else {
+        return None;
+    };
     if session.started.elapsed() >= SESSION_TTL || session.callback.is_some() {
         return None;
     }
-    let notice = CallbackNotice { session_id: session_id.clone(), name: unique("name").unwrap_or_default() };
+    let notice = CallbackNotice {
+        session_id: session_id.clone(),
+        name: unique("name").unwrap_or_default(),
+    };
     session.callback = Some(OAuthCallback {
         code,
         name: notice.name.clone(),
@@ -212,41 +277,64 @@ pub async fn finish_oauth(
     local_path: String,
     drive_id: Option<String>,
 ) -> Result<String, String> {
-    let session = manager.sessions.lock().await.remove(&session_id)
+    let session = manager
+        .sessions
+        .lock()
+        .await
+        .remove(&session_id)
         .ok_or_else(|| "Authorization session expired".to_string())?;
     if session.started.elapsed() >= SESSION_TTL {
         return Err("Authorization session expired".into());
     }
-    let callback = session.callback.ok_or_else(|| "Authorization callback has not arrived".to_string())?;
+    let callback = session
+        .callback
+        .ok_or_else(|| "Authorization callback has not arrived".to_string())?;
     let base = Url::parse(&session.site_url).map_err(|_| "Invalid site URL")?;
-    let token_url = base.join("/api/v4/session/oauth/token").map_err(|_| "Invalid token URL")?;
+    let token_url = base
+        .join("/api/v4/session/oauth/token")
+        .map_err(|_| "Invalid token URL")?;
     let client = http_client()?;
-    let response = client.post(token_url).form(&[
-        ("grant_type", "authorization_code"),
-        ("client_id", CLIENT_ID),
-        ("client_secret", CLIENT_SECRET),
-        ("code", callback.code.as_str()),
-        ("redirect_uri", CALLBACK_PATH),
-        ("code_verifier", session.verifier.as_str()),
-    ]).send().await.map_err(|_| "Token exchange failed")?;
+    let response = client
+        .post(token_url)
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("client_id", CLIENT_ID),
+            ("client_secret", CLIENT_SECRET),
+            ("code", callback.code.as_str()),
+            ("redirect_uri", CALLBACK_PATH),
+            ("code_verifier", session.verifier.as_str()),
+        ])
+        .send()
+        .await
+        .map_err(|_| "Token exchange failed")?;
     if !response.status().is_success() {
         return Err(format!("Token exchange failed: HTTP {}", response.status()));
     }
     let token: TokenResponse = small_json(response).await?;
-    let app_state = state.get().ok_or_else(|| "App not yet initialized".to_string())?;
-    add_drive_with_tokens(app_state, AddDriveArgs {
-        site_url: session.site_url,
-        access_token: token.access_token,
-        refresh_token: token.refresh_token,
-        access_token_expires: token.expires_in,
-        refresh_token_expires: token.refresh_token_expires_in,
-        drive_name: if drive_name.is_empty() { callback.name } else { drive_name },
-        remote_path: callback.path,
-        local_path,
-        user_id: callback.user_id,
-        drive_id,
-        allow_insecure_http: session.allow_insecure_http,
-    }).await
+    let app_state = state
+        .get()
+        .ok_or_else(|| "App not yet initialized".to_string())?;
+    add_drive_with_tokens(
+        app_state,
+        AddDriveArgs {
+            site_url: session.site_url,
+            access_token: token.access_token,
+            refresh_token: token.refresh_token,
+            access_token_expires: token.expires_in,
+            refresh_token_expires: token.refresh_token_expires_in,
+            drive_name: if drive_name.is_empty() {
+                callback.name
+            } else {
+                drive_name
+            },
+            remote_path: callback.path,
+            local_path,
+            user_id: callback.user_id,
+            drive_id,
+            allow_insecure_http: session.allow_insecure_http,
+        },
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -269,22 +357,49 @@ mod tests {
 
     #[test]
     fn callback_requires_exact_target_state_and_single_use() {
-        let mut sessions = HashMap::from([("session".into(), OAuthSession {
-            site_url: "https://cloud.example".into(),
-            state: "expected".into(),
-            verifier: "verifier".into(),
-            started: Instant::now(),
-            allow_insecure_http: false,
-            callback: None,
-        })]);
-        assert!(accept_callback(&mut sessions, "cloudreve://callback/other?state=expected&code=secret").is_none());
-        assert!(accept_callback(&mut sessions, "cloudreve://callback/desktop?state=wrong&code=secret").is_none());
-        assert!(accept_callback(&mut sessions, "cloudreve://callback/desktop?state=expected&state=expected&code=secret").is_none());
-        assert!(accept_callback(&mut sessions, "cloudreve://callback/desktop?state=expected&code=secret").is_some());
-        assert!(accept_callback(&mut sessions, "cloudreve://callback/desktop?state=expected&code=secret").is_none());
+        let mut sessions = HashMap::from([(
+            "session".into(),
+            OAuthSession {
+                site_url: "https://cloud.example".into(),
+                state: "expected".into(),
+                verifier: "verifier".into(),
+                started: Instant::now(),
+                allow_insecure_http: false,
+                callback: None,
+            },
+        )]);
+        assert!(accept_callback(
+            &mut sessions,
+            "cloudreve://callback/other?state=expected&code=secret"
+        )
+        .is_none());
+        assert!(accept_callback(
+            &mut sessions,
+            "cloudreve://callback/desktop?state=wrong&code=secret"
+        )
+        .is_none());
+        assert!(accept_callback(
+            &mut sessions,
+            "cloudreve://callback/desktop?state=expected&state=expected&code=secret"
+        )
+        .is_none());
+        assert!(accept_callback(
+            &mut sessions,
+            "cloudreve://callback/desktop?state=expected&code=secret"
+        )
+        .is_some());
+        assert!(accept_callback(
+            &mut sessions,
+            "cloudreve://callback/desktop?state=expected&code=secret"
+        )
+        .is_none());
 
         sessions.get_mut("session").unwrap().callback = None;
         sessions.get_mut("session").unwrap().started = Instant::now() - SESSION_TTL;
-        assert!(accept_callback(&mut sessions, "cloudreve://callback/desktop?state=expected&code=secret").is_none());
+        assert!(accept_callback(
+            &mut sessions,
+            "cloudreve://callback/desktop?state=expected&code=secret"
+        )
+        .is_none());
     }
 }

@@ -16,7 +16,9 @@ pub fn write_private<P: AsRef<Path>, C: AsRef<[u8]>>(path: P, contents: C) -> Re
     {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
-        let parent = path.parent().context("Credential file has no parent directory")?;
+        let parent = path
+            .parent()
+            .context("Credential file has no parent directory")?;
         let temp = parent.join(format!(".credentials-{}.tmp", uuid::Uuid::new_v4()));
         let mut f = std::fs::OpenOptions::new()
             .write(true)
@@ -25,7 +27,8 @@ pub fn write_private<P: AsRef<Path>, C: AsRef<[u8]>>(path: P, contents: C) -> Re
             .open(&temp)
             .with_context(|| format!("Failed to create private file in {}", parent.display()))?;
         let result = (|| -> Result<()> {
-            f.write_all(contents.as_ref()).context("Failed to write private file")?;
+            f.write_all(contents.as_ref())
+                .context("Failed to write private file")?;
             f.sync_all().context("Failed to sync private file")?;
             drop(f);
             std::fs::rename(&temp, path).context("Failed to replace credential file")?;
@@ -74,7 +77,10 @@ mod tests {
         let file = dir.path().join("drives.json");
         write_private(&file, b"{\"token\":\"secret\"}").unwrap();
         let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "credential file must not be group/world readable");
+        assert_eq!(
+            mode, 0o600,
+            "credential file must not be group/world readable"
+        );
     }
 
     #[test]
@@ -98,7 +104,12 @@ mod tests {
         write_private(&file, b"new").unwrap();
         assert_eq!(std::fs::read(&outside).unwrap(), b"keep");
         assert_eq!(std::fs::read(&file).unwrap(), b"new");
-        assert!(!std::fs::symlink_metadata(&file).unwrap().file_type().is_symlink());
+        assert!(
+            !std::fs::symlink_metadata(&file)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 }
 

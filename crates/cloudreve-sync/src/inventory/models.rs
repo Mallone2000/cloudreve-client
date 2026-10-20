@@ -70,7 +70,9 @@ pub struct FileMetadata {
 impl FileMetadata {
     /// The local file mtime (unix seconds) recorded at last sync, if any.
     pub fn local_mtime(&self) -> Option<i64> {
-        self.metadata.get(LOCAL_MTIME_KEY).and_then(|v| v.parse().ok())
+        self.metadata
+            .get(LOCAL_MTIME_KEY)
+            .and_then(|v| v.parse().ok())
     }
 
     /// Whether the local file diverged from the last synced state.
@@ -166,7 +168,8 @@ impl MetadataEntry {
     /// A `None` value leaves the metadata map untouched.
     pub fn with_local_mtime(mut self, mtime: Option<i64>) -> Self {
         if let Some(mtime) = mtime {
-            self.metadata.insert(LOCAL_MTIME_KEY.to_string(), mtime.to_string());
+            self.metadata
+                .insert(LOCAL_MTIME_KEY.to_string(), mtime.to_string());
         }
         self
     }
@@ -452,8 +455,7 @@ mod tests {
 
         // Same size, different content, mtime pushed forward.
         std::fs::write(&path, b"bbbb").unwrap();
-        filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(4102444800, 0))
-            .unwrap();
+        filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(4102444800, 0)).unwrap();
         assert!(meta.is_locally_modified(&path));
     }
 

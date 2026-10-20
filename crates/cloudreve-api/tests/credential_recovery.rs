@@ -1,14 +1,14 @@
 //! Behavior tests for credential handling: a token rejected or expired must be
 //! transparently refreshed instead of flagging the drive as "credentials expired".
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use base64::Engine;
+use chrono::{Duration, Utc};
 use cloudreve_api::client::RequestOptions;
 use cloudreve_api::models::user::Token;
 use cloudreve_api::{Client, ClientConfig};
-use chrono::{Duration, Utc};
 use serde_json::json;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -105,10 +105,12 @@ async fn rejected_access_token_is_refreshed_and_request_retried() {
     let (client, invalid_calls) =
         client_with_tokens(&server, "stale-token", Duration::hours(1)).await;
 
-    let result: Result<serde_json::Value, _> =
-        client.get("/user/me", RequestOptions::new()).await;
+    let result: Result<serde_json::Value, _> = client.get("/user/me", RequestOptions::new()).await;
 
-    assert!(result.is_ok(), "request should succeed after refresh: {result:?}");
+    assert!(
+        result.is_ok(),
+        "request should succeed after refresh: {result:?}"
+    );
     assert_eq!(
         invalid_calls.load(Ordering::SeqCst),
         0,
@@ -185,10 +187,12 @@ async fn refresh_rejection_notifies_credential_invalid() {
     let (client, invalid_calls) =
         client_with_tokens(&server, "expired-token", Duration::seconds(-10)).await;
 
-    let result: Result<serde_json::Value, _> =
-        client.get("/user/me", RequestOptions::new()).await;
+    let result: Result<serde_json::Value, _> = client.get("/user/me", RequestOptions::new()).await;
 
-    assert!(result.is_err(), "request must fail when refresh is rejected");
+    assert!(
+        result.is_err(),
+        "request must fail when refresh is rejected"
+    );
     assert!(
         invalid_calls.load(Ordering::SeqCst) >= 1,
         "a rejected refresh token must report invalid credentials"

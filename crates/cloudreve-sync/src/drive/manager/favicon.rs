@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
+use futures::StreamExt;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use futures::StreamExt;
 use std::{io::Write, path::PathBuf};
 
 /// Manifest.json structure
@@ -59,7 +59,9 @@ fn get_icons_dir() -> Result<PathBuf> {
 }
 
 pub(super) fn cached_icon_is_safe(path: &str) -> bool {
-    let Ok(cache_dir) = get_icons_dir() else { return false; };
+    let Ok(cache_dir) = get_icons_dir() else {
+        return false;
+    };
     let path = std::path::Path::new(path);
     path.parent() == Some(cache_dir.as_path())
         && std::fs::symlink_metadata(path)
@@ -115,7 +117,8 @@ async fn download_icon(client: &reqwest::Client, url: &str) -> Result<bytes::Byt
         .get(url)
         .send()
         .await
-        .map_err(reqwest::Error::without_url).context("Failed to download icon")?;
+        .map_err(reqwest::Error::without_url)
+        .context("Failed to download icon")?;
 
     let status = response.status();
     if !status.is_success() {
@@ -126,13 +129,18 @@ async fn download_icon(client: &reqwest::Client, url: &str) -> Result<bytes::Byt
 }
 
 async fn read_limited(response: reqwest::Response, limit: usize) -> Result<bytes::Bytes> {
-    if response.content_length().is_some_and(|size| size > limit as u64) {
+    if response
+        .content_length()
+        .is_some_and(|size| size > limit as u64)
+    {
         anyhow::bail!("Remote image or manifest is too large");
     }
     let mut body = bytes::BytesMut::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(reqwest::Error::without_url).context("Failed to read remote image")?;
+        let chunk = chunk
+            .map_err(reqwest::Error::without_url)
+            .context("Failed to read remote image")?;
         if chunk.len() > limit.saturating_sub(body.len()) {
             anyhow::bail!("Remote image or manifest is too large");
         }
@@ -147,14 +155,20 @@ fn get_fallback_icon(_icon_type: IconType) -> Result<Vec<u8>> {
 }
 
 /// Save icon bytes to destination, converting to ICO if needed
-fn save_icon(bytes: &[u8], dest_path: &PathBuf, convert_to_ico: bool, is_already_ico: bool) -> Result<()> {
+fn save_icon(
+    bytes: &[u8],
+    dest_path: &PathBuf,
+    convert_to_ico: bool,
+    is_already_ico: bool,
+) -> Result<()> {
     let output = if convert_to_ico && !is_already_ico {
         // Convert image to ICO format
         let img = image::load_from_memory(bytes).context("Failed to load image")?;
         // Resize to 64x64 for ICO
         let resized = img.resize(64, 64, image::imageops::FilterType::Lanczos3);
         let mut encoded = std::io::Cursor::new(Vec::new());
-        resized.write_to(&mut encoded, image::ImageOutputFormat::Ico)
+        resized
+            .write_to(&mut encoded, image::ImageOutputFormat::Ico)
             .context("Failed to encode ICO")?;
         encoded.into_inner()
     } else {
@@ -162,9 +176,13 @@ fn save_icon(bytes: &[u8], dest_path: &PathBuf, convert_to_ico: bool, is_already
     };
     // A rename replaces an existing symlink instead of writing through it.
     let temp_path = dest_path.with_file_name(format!(".icon-{}", uuid::Uuid::new_v4()));
-    let mut temp = std::fs::OpenOptions::new().write(true).create_new(true)
-        .open(&temp_path).context("Failed to create icon cache file")?;
-    temp.write_all(&output).context("Failed to write icon cache file")?;
+    let mut temp = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+        .context("Failed to create icon cache file")?;
+    temp.write_all(&output)
+        .context("Failed to write icon cache file")?;
     drop(temp);
     std::fs::rename(&temp_path, dest_path).context("Failed to install icon cache file")?;
     Ok(())
@@ -240,12 +258,21 @@ mod file_safety_tests {
         save_icon(b"new icon", &cache, false, false).unwrap();
         assert_eq!(std::fs::read(&outside).unwrap(), b"keep");
         assert_eq!(std::fs::read(&cache).unwrap(), b"new icon");
-        assert!(!std::fs::symlink_metadata(&cache).unwrap().file_type().is_symlink());
+        assert!(
+            !std::fs::symlink_metadata(&cache)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 }
 
 /// Fetch icons from remote server
-async fn fetch_icons_from_remote(instance_url: &str, icons_dir: &PathBuf, hash: &str) -> Result<FaviconResult> {
+async fn fetch_icons_from_remote(
+    instance_url: &str,
+    icons_dir: &PathBuf,
+    hash: &str,
+) -> Result<FaviconResult> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
@@ -262,10 +289,14 @@ async fn fetch_icons_from_remote(instance_url: &str, icons_dir: &PathBuf, hash: 
         .await
         .context("Failed to fetch manifest.json")?;
     if !manifest_response.status().is_success() {
-        anyhow::bail!("Manifest request failed: HTTP {}", manifest_response.status());
+        anyhow::bail!(
+            "Manifest request failed: HTTP {}",
+            manifest_response.status()
+        );
     }
-    let manifest: Manifest = serde_json::from_slice(&read_limited(manifest_response, 1024 * 1024).await?)
-        .context("Failed to parse manifest.json")?;
+    let manifest: Manifest =
+        serde_json::from_slice(&read_limited(manifest_response, 1024 * 1024).await?)
+            .context("Failed to parse manifest.json")?;
 
     // Find the smallest icon for ICO (Windows shell integration)
     let smallest_icon = manifest

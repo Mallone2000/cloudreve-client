@@ -161,9 +161,10 @@ impl ConfigManager {
             crate::utils::secure_fs::restrict_dir(parent)?;
         }
 
-        let config = self.config.read().map_err(|e| {
-            anyhow::anyhow!("Failed to acquire read lock on config: {}", e)
-        })?;
+        let config = self
+            .config
+            .read()
+            .map_err(|e| anyhow::anyhow!("Failed to acquire read lock on config: {}", e))?;
 
         let content =
             serde_json::to_string_pretty(&*config).context("Failed to serialize config")?;
@@ -190,9 +191,10 @@ impl ConfigManager {
         F: FnOnce(&mut AppConfig),
     {
         {
-            let mut config = self.config.write().map_err(|e| {
-                anyhow::anyhow!("Failed to acquire write lock on config: {}", e)
-            })?;
+            let mut config = self
+                .config
+                .write()
+                .map_err(|e| anyhow::anyhow!("Failed to acquire write lock on config: {}", e))?;
             f(&mut config);
         }
         self.save()
@@ -200,10 +202,7 @@ impl ConfigManager {
 
     /// Get whether auto-start is enabled
     pub fn auto_start(&self) -> bool {
-        self.config
-            .read()
-            .map(|c| c.auto_start)
-            .unwrap_or(true)
+        self.config.read().map(|c| c.auto_start).unwrap_or(true)
     }
 
     /// Set whether auto-start is enabled
@@ -275,10 +274,7 @@ impl ConfigManager {
 
     /// Get whether log to file is enabled
     pub fn log_to_file(&self) -> bool {
-        self.config
-            .read()
-            .map(|c| c.log_to_file)
-            .unwrap_or(true)
+        self.config.read().map(|c| c.log_to_file).unwrap_or(true)
     }
 
     /// Set whether log to file is enabled
@@ -305,10 +301,7 @@ impl ConfigManager {
 
     /// Get the max log files
     pub fn log_max_files(&self) -> usize {
-        self.config
-            .read()
-            .map(|c| c.log_max_files)
-            .unwrap_or(5)
+        self.config.read().map(|c| c.log_max_files).unwrap_or(5)
     }
 
     /// Set the max log files

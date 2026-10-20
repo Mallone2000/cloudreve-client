@@ -42,7 +42,8 @@ impl From<&DriveConfig> for DriveSummary {
             max_file_size_mb: config.max_file_size_mb,
             allow_insecure_http: config.allow_insecure_http,
             transport_consent_required: url::Url::parse(&config.instance_url)
-                .is_ok_and(|url| url.scheme() == "http") && !config.allow_insecure_http,
+                .is_ok_and(|url| url.scheme() == "http")
+                && !config.allow_insecure_http,
         }
     }
 }
@@ -85,8 +86,11 @@ mod summary_tests {
         assert!(!json.contains("credentials"));
         let status = StatusSummary {
             drives: vec![DriveSummary::from(&config)],
-            active_tasks: vec![], finished_tasks: vec![],
-            has_ever_synced: false, conflicts: vec![], paused_drives: vec![],
+            active_tasks: vec![],
+            finished_tasks: vec![],
+            has_ever_synced: false,
+            conflicts: vec![],
+            paused_drives: vec![],
         };
         let status_json = serde_json::to_string(&status).unwrap();
         assert!(!status_json.contains("ACCESS_SENTINEL"));
@@ -98,8 +102,12 @@ mod summary_tests {
         let mut serialized = serde_json::to_value(DriveConfig {
             instance_url: "http://cloud.example".into(),
             ..Default::default()
-        }).unwrap();
-        serialized.as_object_mut().unwrap().remove("allow_insecure_http");
+        })
+        .unwrap();
+        serialized
+            .as_object_mut()
+            .unwrap()
+            .remove("allow_insecure_http");
         let config: DriveConfig = serde_json::from_value(serialized).unwrap();
         let summary = DriveSummary::from(&config);
         assert!(!summary.allow_insecure_http);

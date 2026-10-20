@@ -1,6 +1,6 @@
 use crate::drive::mounts::Mount;
-use crate::drive::utils::{is_partial_download, remote_path_to_local_relative_path, SafeSyncPath};
-use crate::inventory::{MetadataEntry, FileMetadata};
+use crate::drive::utils::{SafeSyncPath, is_partial_download, remote_path_to_local_relative_path};
+use crate::inventory::{FileMetadata, MetadataEntry};
 use crate::tasks::TaskPayload;
 use crate::utils::disk_space;
 use crate::utils::toast::send_low_disk_space_toast;
@@ -13,8 +13,8 @@ use cloudreve_api::{
         uri::CrUri,
     },
 };
+use futures::{StreamExt, stream};
 use notify_debouncer_full::DebouncedEvent;
-use futures::{stream, StreamExt};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -184,7 +184,12 @@ pub async fn full_sync(mount: &Mount, local_root: &PathBuf, remote_path: &str) -
     // whatever fits is still worth downloading, and the per-file guard in the
     // download task is the hard stop. Without this warning the user would only
     // see files failing one by one with no explanation.
-    warn_if_sync_will_not_fit(mount, local_root, bytes_to_download(&remote_map, &local_set)).await;
+    warn_if_sync_will_not_fit(
+        mount,
+        local_root,
+        bytes_to_download(&remote_map, &local_set),
+    )
+    .await;
 
     // 4. Union of all known paths
     let all_paths: HashSet<PathBuf> = remote_map
@@ -214,7 +219,8 @@ pub async fn full_sync(mount: &Mount, local_root: &PathBuf, remote_path: &str) -
 
     for rel in &all_paths {
         let local_path = match SafeSyncPath::from_relative_path(rel)
-            .and_then(|safe| safe.join_checked(local_root)) {
+            .and_then(|safe| safe.join_checked(local_root))
+        {
             Ok(path) => path,
             Err(error) => {
                 tracing::warn!(target: "drive::sync", path = %rel.display(), error = %error, "Unsafe path skipped");
@@ -292,8 +298,8 @@ pub async fn full_sync(mount: &Mount, local_root: &PathBuf, remote_path: &str) -
                     }
                     let mut payload = TaskPayload::download(local_path).with_totals(0, rf.size);
                     if let Some(etag) = &rf.primary_entity {
-                        payload = payload
-                            .with_custom_state(serde_json::json!({ "remote_etag": etag }));
+                        payload =
+                            payload.with_custom_state(serde_json::json!({ "remote_etag": etag }));
                     }
                     scheduled_tasks.push(payload);
                 }
@@ -302,7 +308,9 @@ pub async fn full_sync(mount: &Mount, local_root: &PathBuf, remote_path: &str) -
             (false, true, true) => {
                 if let (Some(rf), Some(uuid)) = (remote_map.get(rel), drive_uuid) {
                     let parse_ts = |s: &str| -> i64 {
-                        chrono::DateTime::parse_from_rfc3339(s).map(|dt| dt.timestamp()).unwrap_or(0)
+                        chrono::DateTime::parse_from_rfc3339(s)
+                            .map(|dt| dt.timestamp())
+                            .unwrap_or(0)
                     };
                     let mut entry = MetadataEntry::new(uuid, &path_str, false)
                         .with_created_at(parse_ts(&rf.created_at))
@@ -310,12 +318,17 @@ pub async fn full_sync(mount: &Mount, local_root: &PathBuf, remote_path: &str) -
                         .with_etag(rf.primary_entity.clone().unwrap_or_default())
                         .with_size(rf.size)
                         .with_local_mtime(crate::inventory::local_mtime_secs(&local_path));
-                    let local_size = std::fs::metadata(&local_path).map(|m| m.len()).unwrap_or(u64::MAX);
-                    if local_size != rf.size.max(0) as u64 || rf.primary_entity.as_deref().is_none_or(str::is_empty) {
+                    let local_size = std::fs::metadata(&local_path)
+                        .map(|m| m.len())
+                        .unwrap_or(u64::MAX);
+                    if local_size != rf.size.max(0) as u64
+                        || rf.primary_entity.as_deref().is_none_or(str::is_empty)
+                    {
                         entry.conflict_state = Some(crate::inventory::ConflictState::Pending);
                     } else {
                         entry.conflict_state = Some(crate::inventory::ConflictState::Verifying);
-                        collision_verifications.push((local_path, rf.primary_entity.clone().unwrap_or_default()));
+                        collision_verifications
+                            .push((local_path, rf.primary_entity.clone().unwrap_or_default()));
                     }
                     collision_entries.push(entry);
                 }
@@ -325,10 +338,16 @@ pub async fn full_sync(mount: &Mount, local_root: &PathBuf, remote_path: &str) -
                 if let (Some(db_entry), Some(rf)) = (db_map.get(rel), remote_map.get(rel)) {
                     if db_entry.conflict_state == Some(crate::inventory::ConflictState::Verifying) {
                         if rf.primary_entity.as_deref().is_none_or(str::is_empty) {
-                            mount.inventory.mark_as_conflicted(&path_str, Some(crate::inventory::ConflictState::Pending))?;
+                            mount.inventory.mark_as_conflicted(
+                                &path_str,
+                                Some(crate::inventory::ConflictState::Pending),
+                            )?;
                         } else {
-                            scheduled_tasks.push(TaskPayload::verify_collision(local_path)
-                                .with_custom_state(serde_json::json!({"remote_etag": rf.primary_entity.clone()})));
+                            scheduled_tasks.push(
+                                TaskPayload::verify_collision(local_path).with_custom_state(
+                                    serde_json::json!({"remote_etag": rf.primary_entity.clone()}),
+                                ),
+                            );
                         }
                         continue;
                     }
@@ -400,8 +419,7 @@ pub async fn full_sync(mount: &Mount, local_root: &PathBuf, remote_path: &str) -
                             remote_etag = %remote_etag,
                             "Remote file modified since last sync, downloading"
                         );
-                        let mut payload =
-                            TaskPayload::download(local_path).with_totals(0, rf.size);
+                        let mut payload = TaskPayload::download(local_path).with_totals(0, rf.size);
                         if !remote_etag.is_empty() {
                             payload = payload.with_custom_state(
                                 serde_json::json!({ "remote_etag": remote_etag }),
@@ -439,10 +457,13 @@ pub async fn full_sync(mount: &Mount, local_root: &PathBuf, remote_path: &str) -
     if !collision_entries.is_empty() {
         let inventory = mount.inventory.clone();
         tokio::task::spawn_blocking(move || inventory.batch_upsert(&collision_entries))
-            .await.context("Collision inventory write panicked")??;
+            .await
+            .context("Collision inventory write panicked")??;
         for (path, etag) in collision_verifications {
-            scheduled_tasks.push(TaskPayload::verify_collision(path)
-                .with_custom_state(serde_json::json!({"remote_etag": etag})));
+            scheduled_tasks.push(
+                TaskPayload::verify_collision(path)
+                    .with_custom_state(serde_json::json!({"remote_etag": etag})),
+            );
         }
         mount.task_queue.notifier().notify();
     }
@@ -454,7 +475,9 @@ pub async fn full_sync(mount: &Mount, local_root: &PathBuf, remote_path: &str) -
         tokio::task::spawn_blocking(move || {
             let paths: Vec<&str> = inventory_deletes.iter().map(String::as_str).collect();
             inventory.batch_delete_by_path(paths)
-        }).await.context("Inventory cleanup task panicked")??;
+        })
+        .await
+        .context("Inventory cleanup task panicked")??;
     }
 
     tracing::info!(target: "drive::sync", id = %mount.id, "Full sync complete");
@@ -488,7 +511,8 @@ async fn list_remote_recursive(mount: &Mount, base: &CrUri) -> Result<Vec<FileRe
             let client = client.clone();
             let base = base.clone();
             async move { list_one_remote_directory(client, dir, base, page_size).await }
-        })).buffer_unordered(4);
+        }))
+        .buffer_unordered(4);
         while let Some(result) = listings.next().await {
             let (files, children, learned_page_size) = result?;
             if server_page_size.is_none() {
@@ -516,7 +540,9 @@ async fn list_one_remote_directory(
     let mut last_position: Option<(i32, Option<String>)> = None;
     loop {
         // Page size is frozen within a directory to keep offset windows stable.
-        let mut response = client.list_files_all(previous.as_ref(), &uri, page_size).await
+        let mut response = client
+            .list_files_all(previous.as_ref(), &uri, page_size)
+            .await
             .context("Failed to list remote directory")?;
         if learned_page_size.is_none() && response.res.props.max_page_size > 0 {
             learned_page_size = Some(response.res.props.max_page_size);
@@ -536,9 +562,15 @@ async fn list_one_remote_directory(
         if !response.more {
             break;
         }
-        let position = (response.res.pagination.page, response.res.pagination.next_token.clone());
+        let position = (
+            response.res.pagination.page,
+            response.res.pagination.next_token.clone(),
+        );
         if last_position.as_ref() == Some(&position) {
-            anyhow::bail!("Remote listing of {uri} is not advancing past page {}", position.0);
+            anyhow::bail!(
+                "Remote listing of {uri} is not advancing past page {}",
+                position.0
+            );
         }
         last_position = Some(position);
         previous = Some(response);
@@ -629,7 +661,10 @@ mod tests {
     use std::time::Instant;
 
     fn ev(kind: EventKind, path: &str) -> DebouncedEvent {
-        DebouncedEvent::new(Event::new(kind).add_path(PathBuf::from(path)), Instant::now())
+        DebouncedEvent::new(
+            Event::new(kind).add_path(PathBuf::from(path)),
+            Instant::now(),
+        )
     }
 
     /// Partial downloads live inside the sync folder while they are being
@@ -638,8 +673,14 @@ mod tests {
     #[test]
     fn partial_downloads_are_not_reported_as_local_changes() {
         let grouped = group_fs_events(vec![
-            ev(EventKind::Create(CreateKind::File), "/sync/.cloudreve-part-abc123"),
-            ev(EventKind::Modify(ModifyKind::Any), "/sync/.cloudreve-part-abc123"),
+            ev(
+                EventKind::Create(CreateKind::File),
+                "/sync/.cloudreve-part-abc123",
+            ),
+            ev(
+                EventKind::Modify(ModifyKind::Any),
+                "/sync/.cloudreve-part-abc123",
+            ),
             ev(EventKind::Create(CreateKind::File), "/sync/real.txt"),
         ]);
 
@@ -666,13 +707,23 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("secret"), b"secret").unwrap();
         std::os::unix::fs::symlink(outside.path(), root.path().join("linked-dir")).unwrap();
-        std::os::unix::fs::symlink(outside.path().join("secret"), root.path().join("linked-file")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("secret"),
+            root.path().join("linked-file"),
+        )
+        .unwrap();
         std::fs::write(root.path().join("real"), b"real").unwrap();
-        assert_eq!(walk_local(root.path().to_path_buf()).await.unwrap(), vec![root.path().join("real")]);
+        assert_eq!(
+            walk_local(root.path().to_path_buf()).await.unwrap(),
+            vec![root.path().join("real")]
+        );
     }
 
     fn sized(size: i64) -> FileResponse {
-        FileResponse { size, ..Default::default() }
+        FileResponse {
+            size,
+            ..Default::default()
+        }
     }
 
     /// Only files missing locally have to be written to disk.
@@ -789,7 +840,9 @@ mod tests {
             flag.store(true, std::sync::atomic::Ordering::SeqCst);
         });
 
-        let entries = load_db_entries(db, Uuid::new_v4().to_string()).await.unwrap();
+        let entries = load_db_entries(db, Uuid::new_v4().to_string())
+            .await
+            .unwrap();
 
         assert!(entries.is_empty());
         assert!(

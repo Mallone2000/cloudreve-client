@@ -109,7 +109,8 @@ impl ChunkReader {
         let safe = crate::drive::utils::SafeSyncPath::from_local(path, sync_root)?;
         let root = sync_root.to_path_buf();
         let file = tokio::task::spawn_blocking(move || safe.open_read_checked(&root))
-            .await.context("file open task panicked")??;
+            .await
+            .context("file open task panicked")??;
         let file = File::from_std(file);
         let mut reader = BufReader::with_capacity(STREAM_BUFFER_SIZE, file);
         reader.seek(SeekFrom::Start(offset)).await?;
@@ -144,8 +145,15 @@ mod path_safety_tests {
         std::fs::write(outside.path().join("file"), b"outside").unwrap();
         std::fs::rename(root.path().join("folder"), root.path().join("old-folder")).unwrap();
         std::os::unix::fs::symlink(outside.path(), root.path().join("folder")).unwrap();
-        assert!(ChunkReader::new(&path, root.path(), 0, 6, None).await.is_err());
-        assert_eq!(std::fs::read(outside.path().join("file")).unwrap(), b"outside");
+        assert!(
+            ChunkReader::new(&path, root.path(), 0, 6, None)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read(outside.path().join("file")).unwrap(),
+            b"outside"
+        );
     }
 }
 
@@ -226,7 +234,8 @@ impl ChunkStream {
         chunk: &ChunkInfo,
         encryption: Option<EncryptionConfig>,
     ) -> Result<Self> {
-        let reader = ChunkReader::new(path, sync_root, chunk.offset, chunk.size, encryption).await?;
+        let reader =
+            ChunkReader::new(path, sync_root, chunk.offset, chunk.size, encryption).await?;
         Ok(Self::new(reader))
     }
 }
@@ -751,9 +760,12 @@ async fn upload_chunk_with_retry(
         }
 
         // Create a fresh stream for each attempt
-        let inner_stream = ChunkStream::from_chunk(local_path, sync_root, chunk, encryption.clone())
-            .await
-            .map_err(|e| UploadError::FileReadError(format!("Failed to create stream: {}", e)))?;
+        let inner_stream =
+            ChunkStream::from_chunk(local_path, sync_root, chunk, encryption.clone())
+                .await
+                .map_err(|e| {
+                    UploadError::FileReadError(format!("Failed to create stream: {}", e))
+                })?;
 
         // Wrap with progress tracking
         let progress_stream = ProgressStream::new(inner_stream, Arc::clone(tracker));

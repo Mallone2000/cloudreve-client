@@ -1,9 +1,9 @@
-use crate::drive::mounts::Mount;
 use crate::EventBroadcaster;
 use crate::config::ConfigManager;
+use crate::drive::mounts::Mount;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 
@@ -84,7 +84,8 @@ impl HeartbeatManager {
                     let ping_result = tokio::time::timeout(
                         tokio::time::Duration::from_secs(PING_TIMEOUT_SECS),
                         mount.cr_client.ping(),
-                    ).await;
+                    )
+                    .await;
 
                     match ping_result {
                         Ok(Ok(_)) => {

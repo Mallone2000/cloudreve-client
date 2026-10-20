@@ -64,7 +64,8 @@ async fn permanently_failed_download_is_not_retried_until_remote_changes() {
     let env = TestEnv::new().await;
 
     // Remote lists a file whose blob is gone server-side.
-    env.set_remote_files(vec![remote_file("broken.png", 5, "etag-1")]).await;
+    env.set_remote_files(vec![remote_file("broken.png", 5, "etag-1")])
+        .await;
     mock_broken_entity(&env.server, "broken.png", 5, "etag-1").await;
 
     env.full_sync().await.expect("first full sync");
@@ -81,7 +82,8 @@ async fn permanently_failed_download_is_not_retried_until_remote_changes() {
     );
 
     // The remote file changed (new etag): now a retry is justified.
-    env.set_remote_files(vec![remote_file("broken.png", 5, "etag-2")]).await;
+    env.set_remote_files(vec![remote_file("broken.png", 5, "etag-2")])
+        .await;
     mock_broken_entity(&env.server, "broken.png", 5, "etag-2").await;
 
     env.full_sync().await.expect("third full sync");

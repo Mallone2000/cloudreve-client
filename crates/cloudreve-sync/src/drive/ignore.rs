@@ -62,7 +62,7 @@ pub fn default_patterns() -> Vec<String> {
     DEFAULT_FILE_PATTERNS
         .iter()
         .chain(DEFAULT_JUNK_DIRS)
-                .map(|p| (*p).to_string())
+        .map(|p| (*p).to_string())
         .collect()
 }
 
@@ -528,7 +528,10 @@ mod tests {
         let shown = shown.build().unwrap();
 
         for junk in REAL_WORLD_JUNK {
-            assert!(engine.is_match(sync_root.join(junk)), "{junk} is not blocked at all");
+            assert!(
+                engine.is_match(sync_root.join(junk)),
+                "{junk} is not blocked at all"
+            );
             assert!(
                 shown.is_match(junk),
                 "{junk} is blocked but no line shown in Settings accounts for it"
@@ -563,8 +566,14 @@ mod tests {
         let patterns = vec!["[unclosed".to_string(), "*.log".to_string()];
         let matcher = IgnoreMatcher::new(&patterns, sync_root.clone()).unwrap();
 
-        assert!(matcher.is_match(sync_root.join("debug.log")), "the valid pattern was dropped");
-        assert!(matcher.is_match(sync_root.join(".DS_Store")), "the defaults were dropped");
+        assert!(
+            matcher.is_match(sync_root.join("debug.log")),
+            "the valid pattern was dropped"
+        );
+        assert!(
+            matcher.is_match(sync_root.join(".DS_Store")),
+            "the defaults were dropped"
+        );
         assert!(!matcher.is_match(sync_root.join("report.pdf")));
     }
 

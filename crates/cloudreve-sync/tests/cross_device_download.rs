@@ -28,7 +28,9 @@ async fn a_file_downloads_onto_a_volume_of_its_own() {
         return;
     };
     assert_ne!(
-        std::env::temp_dir().to_string_lossy().starts_with("/Volumes/CloudreveXDevTest"),
+        std::env::temp_dir()
+            .to_string_lossy()
+            .starts_with("/Volumes/CloudreveXDevTest"),
         true,
         "the test volume must differ from the system temp volume"
     );
@@ -77,7 +79,10 @@ async fn a_file_downloads_onto_a_volume_of_its_own() {
         .into_iter()
         .find(|t| t.status == TaskStatus::Failed)
         .and_then(|t| t.error);
-    assert!(error.is_none(), "download should not have failed: {error:?}");
+    assert!(
+        error.is_none(),
+        "download should not have failed: {error:?}"
+    );
     assert_eq!(
         std::fs::read(&downloaded).expect("file should exist on the sync volume"),
         b"hello"
