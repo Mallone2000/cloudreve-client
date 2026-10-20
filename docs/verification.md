@@ -4,13 +4,15 @@ Run these checks on a machine with the locked Cargo and Yarn dependencies availa
 
 ```sh
 cd ui && yarn install --frozen-lockfile && yarn lint && yarn build
-cd .. && cargo test --locked -p cloudreve-api -p cloudreve-sync
-cargo test --locked -p cloudreve-sync --test reconciliation_benchmark -- --ignored --nocapture
+cd .. && cargo fmt --all -- --check
+cargo test --locked -p cloudreve-api -p cloudreve-sync
+cargo test --locked -p cloudreve-sync --test reconciliation_benchmark recovery_1000_files -- --ignored --exact --nocapture
+cargo test --locked -p cloudreve-sync --test reconciliation_benchmark recovery_10000_files -- --ignored --exact --nocapture
 cargo check --locked -p cloudreve-desktop
 cargo test --locked -p cloudreve-desktop --lib
 ```
 
-The recovery fixture prints scan time, SQLite connection checkouts, and process peak RSS for 1,000 and 10,000 files. The 10,000-file scan must finish in under 300 seconds on the CI reference runner. Save the output for both the baseline and changed revision before comparing them; machine and dependency versions must be the same. Connection checkouts are a database activity proxy, not a count of SQL statements.
+Each recovery fixture runs in its own process and prints scan time, SQLite connection checkouts, and process peak RSS. The 10,000-file scan must finish in under 300 seconds on the CI reference runner. Save the output for both the baseline and changed revision before comparing them; machine and dependency versions must be the same. Connection checkouts are a database activity proxy, not a count of SQL statements.
 
 After packaging on macOS and Linux, launch the installed application and check:
 

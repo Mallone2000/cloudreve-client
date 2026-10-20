@@ -52,6 +52,9 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
       - name: Rust cache
         uses: swatinem/rust-cache@v2.9.1
         with:
@@ -70,8 +73,11 @@ jobs:
       - name: Run tests
         run: cargo test --locked -p cloudreve-sync -p cloudreve-api
 
-      - name: Benchmark 1,000- and 10,000-file recovery
-        run: cargo test --locked -p cloudreve-sync --test reconciliation_benchmark -- --ignored --nocapture
+      - name: Benchmark 1,000-file recovery
+        run: cargo test --locked -p cloudreve-sync --test reconciliation_benchmark recovery_1000_files -- --ignored --exact --nocapture
+
+      - name: Benchmark 10,000-file recovery
+        run: cargo test --locked -p cloudreve-sync --test reconciliation_benchmark recovery_10000_files -- --ignored --exact --nocapture
 
       - name: Check desktop crate compiles
         # The frontend job builds the UI; this job checks the Rust desktop crate.
