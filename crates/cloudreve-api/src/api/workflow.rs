@@ -96,7 +96,10 @@ impl WorkflowApi for Client {
         ];
 
         if let Some(next_page_token) = &params.next_page_token {
-            query_params.push(format!("next_page_token={}", next_page_token));
+            query_params.push(format!(
+                "next_page_token={}",
+                urlencoding::encode(next_page_token)
+            ));
         }
 
         let query = format!("?{}", query_params.join("&"));

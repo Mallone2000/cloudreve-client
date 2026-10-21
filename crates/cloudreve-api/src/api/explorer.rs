@@ -6,6 +6,55 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use reqwest::Body;
 
+#[cfg(test)]
+mod query_security_tests {
+    use super::*;
+
+    #[test]
+    fn list_files_keeps_cursor_inside_one_query_parameter() {
+        let query = list_files_query(&ListFileService {
+            uri: "cloudreve://my/files".into(),
+            page: None,
+            page_size: None,
+            order_by: None,
+            order_direction: None,
+            next_page_token: Some("cursor&admin=true".into()),
+        });
+        let url = url::Url::parse(&format!("https://example.com/file{query}")).unwrap();
+        let pairs: Vec<_> = url.query_pairs().collect();
+        assert!(pairs
+            .iter()
+            .any(|(key, value)| { key == "next_page_token" && value == "cursor&admin=true" }));
+        assert!(!pairs.iter().any(|(key, _)| key == "admin"));
+    }
+}
+
+fn list_files_query(params: &ListFileService) -> String {
+    let mut query_params = vec![format!("uri={}", urlencoding::encode(&params.uri))];
+    if let Some(page) = params.page {
+        query_params.push(format!("page={}", page));
+    }
+    if let Some(page_size) = params.page_size {
+        query_params.push(format!("page_size={}", page_size));
+    }
+    if let Some(order_by) = &params.order_by {
+        query_params.push(format!("order_by={}", urlencoding::encode(order_by)));
+    }
+    if let Some(order_direction) = &params.order_direction {
+        query_params.push(format!(
+            "order_direction={}",
+            urlencoding::encode(order_direction)
+        ));
+    }
+    if let Some(next_page_token) = &params.next_page_token {
+        query_params.push(format!(
+            "next_page_token={}",
+            urlencoding::encode(next_page_token)
+        ));
+    }
+    format!("?{}", query_params.join("&"))
+}
+
 /// Decode time flow string (for obfuscated thumbnail URLs)
 fn decode_time_flow_string(str: &str, time_now: i64) -> ApiResult<String> {
     // Try with current time
@@ -301,26 +350,7 @@ impl ExplorerApiExt for Client {
 #[async_trait]
 impl ExplorerApi for Client {
     async fn list_files(&self, params: &ListFileService) -> ApiResult<ListResponse> {
-        // Build query string
-        let mut query_params = vec![format!("uri={}", urlencoding::encode(&params.uri))];
-
-        if let Some(page) = params.page {
-            query_params.push(format!("page={}", page));
-        }
-        if let Some(page_size) = params.page_size {
-            query_params.push(format!("page_size={}", page_size));
-        }
-        if let Some(order_by) = &params.order_by {
-            query_params.push(format!("order_by={}", order_by));
-        }
-        if let Some(order_direction) = &params.order_direction {
-            query_params.push(format!("order_direction={}", order_direction));
-        }
-        if let Some(next_page_token) = &params.next_page_token {
-            query_params.push(format!("next_page_token={}", next_page_token));
-        }
-
-        let query = format!("?{}", query_params.join("&"));
+        let query = list_files_query(params);
 
         self.get(
             &format!("/file{}", query),
@@ -364,7 +394,7 @@ impl ExplorerApi for Client {
             query_params.push(format!("uri={}", urlencoding::encode(uri)));
         }
         if let Some(id) = &params.id {
-            query_params.push(format!("id={}", id));
+            query_params.push(format!("id={}", urlencoding::encode(id)));
         }
         if let Some(extended) = params.extended {
             query_params.push(format!("extended={}", extended));
@@ -500,7 +530,7 @@ impl ExplorerApi for Client {
         let mut query_params = vec![format!("uri={}", urlencoding::encode(&params.uri))];
 
         if let Some(previous) = &params.previous {
-            query_params.push(format!("previous={}", previous));
+            query_params.push(format!("previous={}", urlencoding::encode(previous)));
         }
 
         let query = format!("?{}", query_params.join("&"));

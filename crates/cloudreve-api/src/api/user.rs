@@ -107,13 +107,19 @@ impl UserApi for Client {
             query_params.push(format!("page_size={}", page_size));
         }
         if let Some(order_by) = &params.order_by {
-            query_params.push(format!("order_by={}", order_by));
+            query_params.push(format!("order_by={}", urlencoding::encode(order_by)));
         }
         if let Some(order_direction) = &params.order_direction {
-            query_params.push(format!("order_direction={}", order_direction));
+            query_params.push(format!(
+                "order_direction={}",
+                urlencoding::encode(order_direction)
+            ));
         }
         if let Some(next_page_token) = &params.next_page_token {
-            query_params.push(format!("next_page_token={}", next_page_token));
+            query_params.push(format!(
+                "next_page_token={}",
+                urlencoding::encode(next_page_token)
+            ));
         }
 
         let query = if query_params.is_empty() {
