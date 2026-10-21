@@ -255,6 +255,20 @@ impl InventoryDb {
         .context("Failed to update conflict state")?;
         Ok(rows_affected > 0)
     }
+
+    pub fn batch_mark_conflicts(&self, updates: &[(String, ConflictState)]) -> Result<()> {
+        let mut conn = self.connection()?;
+        (&mut *conn).transaction::<(), anyhow::Error, _>(|tx| {
+            for (path, state) in updates {
+                diesel::update(
+                    file_metadata_dsl::file_metadata.filter(file_metadata_dsl::local_path.eq(path)),
+                )
+                .set(file_metadata_dsl::conflict_state.eq(Some(state.as_str())))
+                .execute(tx)?;
+            }
+            Ok(())
+        })
+    }
 }
 
 // =========================================================================

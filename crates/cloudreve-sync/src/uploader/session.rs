@@ -217,6 +217,17 @@ impl UploadSession {
         self.credential.complete_url.as_deref().unwrap_or_default()
     }
 
+    pub fn uses_http_origin(&self, origin: &str) -> bool {
+        self.credential.upload_urls.as_ref().is_some_and(|urls| {
+            urls.iter().any(|raw| {
+                url::Url::parse(raw).is_ok_and(|url| {
+                    url.scheme() == "http" && url.origin().ascii_serialization() == origin
+                })
+            })
+        }) || url::Url::parse(self.complete_url())
+            .is_ok_and(|url| url.scheme() == "http" && url.origin().ascii_serialization() == origin)
+    }
+
     /// Get the callback secret
     pub fn callback_secret(&self) -> &str {
         &self.credential.callback_secret

@@ -86,6 +86,7 @@ where
         .body(body)
         .send()
         .await
+        .map_err(reqwest::Error::without_url)
         .with_context(|| format!("failed to upload chunk {} to OneDrive", chunk.index))?;
 
     let status = response.status();
@@ -96,7 +97,7 @@ where
     }
 
     // Parse error response
-    let body = response.text().await.unwrap_or_default();
+    let body = crate::uploader::providers::read_error_body(response).await;
 
     if let Ok(error) = serde_json::from_str::<OneDriveError>(&body) {
         // Check for fragment overlap error
@@ -108,23 +109,26 @@ where
                     chunk = chunk.index,
                     "Fragment overlap detected, chunk may be already uploaded"
                 );
-                bail!("OneDrive chunk overlap: {}", error.error.message);
+                return Err(crate::uploader::providers::provider_error(
+                    "OneDrive",
+                    status.as_u16(),
+                    Some("fragmentOverlap"),
+                ));
             }
         }
 
-        bail!(
-            "OneDrive error ({}): {}",
-            error.error.code,
-            error.error.message
-        );
+        return Err(crate::uploader::providers::provider_error(
+            "OneDrive",
+            status.as_u16(),
+            Some(&error.error.code),
+        ));
     }
 
-    bail!(
-        "OneDrive chunk {} upload failed: HTTP {}: {}",
-        chunk.index,
-        status,
-        body
-    )
+    Err(crate::uploader::providers::provider_error(
+        "OneDrive",
+        status.as_u16(),
+        None,
+    ))
 }
 
 /// Query OneDrive session status to get next expected range
@@ -139,21 +143,22 @@ pub async fn query_session_status(
         .get(url)
         .send()
         .await
+        .map_err(reqwest::Error::without_url)
         .context("failed to query OneDrive session status")?;
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        bail!(
-            "failed to query OneDrive session: HTTP {}: {}",
-            status,
-            body
-        );
+        return Err(crate::uploader::providers::provider_error(
+            "OneDrive",
+            status.as_u16(),
+            None,
+        ));
     }
 
     let chunk_response: OneDriveChunkResponse = response
         .json()
         .await
+        .map_err(reqwest::Error::without_url)
         .context("failed to parse OneDrive session response")?;
 
     Ok(chunk_response.next_expected_ranges)

@@ -156,6 +156,7 @@ pub(crate) async fn add_drive_with_tokens(
         enabled: true,
         user_id: config.user_id,
         allow_insecure_http: config.allow_insecure_http,
+        approved_http_storage_origins: Vec::new(),
         ignore_patterns: Vec::new(),
         max_file_size_mb: 3072,
         sse_client_id,
@@ -291,6 +292,23 @@ pub async fn set_drive_max_file_size(
         .set_drive_max_file_size(&drive_id, max_mb)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_http_storage_origin_consent(
+    state: State<'_, AppStateHandle>,
+    drive_id: String,
+    origin: String,
+    allow: bool,
+) -> CommandResult<()> {
+    let app_state = state
+        .get()
+        .ok_or_else(|| "App not yet initialized".to_string())?;
+    app_state
+        .drive_manager
+        .set_http_storage_origin_consent(&drive_id, &origin, allow)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

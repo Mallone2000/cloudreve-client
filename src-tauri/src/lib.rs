@@ -45,16 +45,39 @@ mod security_config_tests {
             let permissions = other["permissions"].as_array().unwrap();
             assert!(!permissions.iter().any(|permission| matches!(
                 permission.as_str(),
-                Some("app:allow-begin-oauth" | "app:allow-finish-oauth")
+                Some("allow-begin-oauth" | "allow-finish-oauth")
             )));
         }
         let permissions = add_drive["permissions"].as_array().unwrap();
         assert!(permissions
             .iter()
-            .any(|permission| permission.as_str() == Some("app:allow-begin-oauth")));
+            .any(|permission| permission.as_str() == Some("allow-begin-oauth")));
         assert!(permissions
             .iter()
-            .any(|permission| permission.as_str() == Some("app:allow-finish-oauth")));
+            .any(|permission| permission.as_str() == Some("allow-finish-oauth")));
+    }
+
+    #[test]
+    fn storage_consent_is_only_granted_to_settings_window() {
+        let default: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        let add_drive: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/add-drive.json")).unwrap();
+        let settings: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/settings.json")).unwrap();
+        let permission = "allow-set-http-storage-origin-consent";
+        for other in [&default, &add_drive] {
+            assert!(!other["permissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value.as_str() == Some(permission)));
+        }
+        assert!(settings["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value.as_str() == Some(permission)));
     }
 }
 
@@ -413,6 +436,7 @@ pub fn run() {
             commands::set_ignore_patterns,
             commands::get_drive_max_file_size,
             commands::set_drive_max_file_size,
+            commands::set_http_storage_origin_consent,
             commands::get_sync_status,
             commands::get_status_summary,
             commands::resolve_conflict,

@@ -37,7 +37,8 @@ export default function TaskItem({ task, isActive = false }: TaskItemProps) {
   const fileName = getFileName(task.local_path);
   const parentFolderName = getParentFolderName(task.local_path);
   const isFailed = task.status === "Failed";
-  const isOfflineWaiting = !!(task.custom_state as Record<string, unknown> | undefined)?.["offline_waiting"];
+  const isOfflineWaiting = task.blocked_reason === "offline";
+  const isStorageWaiting = task.blocked_reason === "storage_consent";
 
   const timeAgoFormatter = (
     value: number,
@@ -58,7 +59,7 @@ export default function TaskItem({ task, isActive = false }: TaskItemProps) {
   };
 
   const getStatusBadge = () => {
-    if (isActive && isOfflineWaiting) {
+    if (isActive && (isOfflineWaiting || isStorageWaiting)) {
       return <CloudOffIcon sx={{ fontSize: 14 }} color="warning" />;
     }
     if (isActive) {
@@ -83,6 +84,9 @@ export default function TaskItem({ task, isActive = false }: TaskItemProps) {
   const getSecondaryText = () => {
     if (isActive && isOfflineWaiting) {
       return t("popup.waitingConnection", "Waiting for connection...");
+    }
+    if (isActive && isStorageWaiting) {
+      return `Waiting for HTTP storage approval: ${task.blocked_origin}`;
     }
     if (isActive && liveProgress) {
       const processed = formatBytes(liveProgress.processed_bytes ?? 0);

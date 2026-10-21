@@ -9,10 +9,10 @@
     "core:window:default",
     "opener:default",
     "dialog:default",
-    "app:allow-is-dir-empty",
-    "app:allow-close-window",
-    "app:allow-begin-oauth",
-    "app:allow-finish-oauth",
-    "app:allow-open-folder-and-close-window"
+    "allow-is-dir-empty",
+    "allow-close-window",
+    "allow-begin-oauth",
+    "allow-finish-oauth",
+    "allow-open-folder-and-close-window"
   ]
 }

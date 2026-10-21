@@ -10,7 +10,7 @@
 
 mod common;
 
-use cloudreve_sync::inventory::ConflictState;
+use cloudreve_sync::inventory::{ConflictState, LOCAL_FINGERPRINT_KEY, MetadataEntry};
 use common::{TestEnv, remote_file};
 use serde_json::json;
 use wiremock::{
@@ -73,6 +73,52 @@ async fn identical_file_on_both_sides_is_adopted_without_transfer() {
     let entry = env.db_entry("photo.jpg").expect("file must be tracked");
     assert_eq!(entry.etag, "etag-photo");
     assert!(entry.conflict_state.is_none());
+}
+
+#[tokio::test]
+async fn legacy_inventory_row_is_promoted_only_after_remote_comparison() {
+    let env = TestEnv::new().await;
+    env.write_local("legacy.txt", b"same");
+    env.track_synced("legacy.txt", "etag-legacy");
+    let row = env.db_entry("legacy.txt").unwrap();
+    let mut metadata = row.metadata.clone();
+    metadata.remove(LOCAL_FINGERPRINT_KEY);
+    env.inventory
+        .upsert(&MetadataEntry::from(&row).with_metadata(metadata))
+        .unwrap();
+    env.set_remote_files(vec![remote_file("legacy.txt", 4, "etag-legacy")])
+        .await;
+    mock_collision_download(&env, "legacy.txt", b"same".to_vec(), "etag-legacy").await;
+
+    env.full_sync().await.unwrap();
+    wait_for_verification(&env).await;
+    let promoted = env.db_entry("legacy.txt").unwrap();
+    assert!(promoted.metadata.contains_key(LOCAL_FINGERPRINT_KEY));
+    assert_eq!(promoted.conflict_state, None);
+}
+
+#[tokio::test]
+async fn legacy_row_with_new_remote_version_becomes_conflict() {
+    let env = TestEnv::new().await;
+    env.write_local("legacy.txt", b"same");
+    env.track_synced("legacy.txt", "etag-old");
+    let row = env.db_entry("legacy.txt").unwrap();
+    let mut metadata = row.metadata.clone();
+    metadata.remove(LOCAL_FINGERPRINT_KEY);
+    env.inventory
+        .upsert(&MetadataEntry::from(&row).with_metadata(metadata))
+        .unwrap();
+    env.set_remote_files(vec![remote_file("legacy.txt", 4, "etag-new")])
+        .await;
+    env.full_sync().await.unwrap();
+    assert_eq!(
+        env.db_entry("legacy.txt").unwrap().conflict_state,
+        Some(ConflictState::Pending)
+    );
+    assert_eq!(
+        std::fs::read(env.local_path("legacy.txt")).unwrap(),
+        b"same"
+    );
 }
 
 async fn mock_collision_download(env: &TestEnv, name: &str, content: Vec<u8>, etag: &str) {

@@ -11,13 +11,14 @@ use crate::drive::mounts::DriveConfig;
 /// so the final move stays on one filesystem, which means the sync folder holds
 /// these files while they are being written.
 pub const PARTIAL_DOWNLOAD_PREFIX: &str = ".cloudreve-part-";
+pub const RECOVERY_DOWNLOAD_PREFIX: &str = ".cloudreve-recovery-";
 
 /// Whether `path` is a partial download staged by the client. Such a file is
 /// half-written by definition and must never be scanned, tracked or uploaded.
 pub fn is_partial_download(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| n.starts_with(PARTIAL_DOWNLOAD_PREFIX))
+    path.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+        n.starts_with(PARTIAL_DOWNLOAD_PREFIX) || n.starts_with(RECOVERY_DOWNLOAD_PREFIX)
+    })
 }
 
 pub fn local_path_to_cr_uri(path: PathBuf, root: PathBuf, remote_base: String) -> Result<CrUri> {
@@ -315,6 +316,53 @@ impl SafeSyncPath {
         Ok(())
     }
 
+    /// Install a staged file only when the destination is absent. Never fall
+    /// back to rename(2), whose replacement behavior loses concurrent edits.
+    #[cfg(unix)]
+    pub fn rename_exclusive_checked(&self, root: &Path, destination: &SafeSyncPath) -> Result<()> {
+        use std::os::fd::AsRawFd;
+        let (source_dir, source_name) = self.open_parent_checked(root, false)?;
+        let (destination_dir, destination_name) = destination.open_parent_checked(root, false)?;
+        #[cfg(target_os = "linux")]
+        let result = unsafe {
+            libc::renameat2(
+                source_dir.as_raw_fd(),
+                source_name.as_ptr(),
+                destination_dir.as_raw_fd(),
+                destination_name.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        #[cfg(target_os = "macos")]
+        let result = unsafe {
+            libc::renameatx_np(
+                source_dir.as_raw_fd(),
+                source_name.as_ptr(),
+                destination_dir.as_raw_fd(),
+                destination_name.as_ptr(),
+                libc::RENAME_EXCL,
+            )
+        };
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let result: libc::c_int = -1;
+        if result < 0 {
+            anyhow::bail!(
+                "Exclusive rename unavailable or destination exists: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    pub fn rename_exclusive_checked(
+        &self,
+        _root: &Path,
+        _destination: &SafeSyncPath,
+    ) -> Result<()> {
+        anyhow::bail!("Exclusive rename is unsupported on this filesystem")
+    }
+
     #[cfg(not(unix))]
     pub fn rename_checked(&self, root: &Path, destination: &SafeSyncPath) -> Result<()> {
         Ok(std::fs::rename(
@@ -414,6 +462,29 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), root.path().join("link")).unwrap();
         let safe = SafeSyncPath::from_event_path("/link/file.txt").unwrap();
         assert!(safe.join_checked(root.path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exclusive_install_refuses_an_existing_destination() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(".cloudreve-part-test"), b"staged").unwrap();
+        std::fs::write(root.path().join("file"), b"local edit").unwrap();
+        let staged = SafeSyncPath::from_event_path("/.cloudreve-part-test").unwrap();
+        let destination = SafeSyncPath::from_event_path("/file").unwrap();
+        assert!(
+            staged
+                .rename_exclusive_checked(root.path(), &destination)
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("file")).unwrap(),
+            b"local edit"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join(".cloudreve-part-test")).unwrap(),
+            b"staged"
+        );
     }
 
     #[cfg(unix)]

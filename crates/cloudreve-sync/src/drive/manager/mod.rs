@@ -113,6 +113,7 @@ mod http_consent_tests {
             remote_path: "cloudreve://my".into(),
             sync_path: sync_root.clone(),
             allow_insecure_http: true,
+            approved_http_storage_origins: Vec::new(),
             ..Default::default()
         };
         let mount = Arc::new(Mount::new(config, inventory.clone(), command_tx, notifier).await);
@@ -520,6 +521,39 @@ impl DriveManager {
         Ok(())
     }
 
+    pub async fn set_http_storage_origin_consent(
+        &self,
+        id: &str,
+        raw_origin: &str,
+        allow: bool,
+    ) -> Result<()> {
+        let origin = crate::uploader::transport::canonical_http_origin(raw_origin)?;
+        let mount = self
+            .get_drive(id)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("Drive not found"))?;
+        {
+            let mut config = mount.config.write().await;
+            if allow {
+                if !config.approved_http_storage_origins.contains(&origin) {
+                    config.approved_http_storage_origins.push(origin.clone());
+                }
+            } else {
+                config
+                    .approved_http_storage_origins
+                    .retain(|value| value != &origin);
+            }
+        }
+        self.persist().await?;
+        if allow {
+            mount.task_queue.approve_storage_origin(&origin)?;
+        } else {
+            mount.task_queue.revoke_storage_origin(&origin).await?;
+        }
+        self.summary_notifier.notify();
+        Ok(())
+    }
+
     /// Update drive configuration
     pub async fn update_drive(&self, _id: &str, _config: DriveConfig) -> Result<()> {
         // let mut write_guard = self.drives.write().await;
@@ -693,12 +727,19 @@ impl DriveManager {
 
     /// Update the max file size limit (in MB) for a drive.
     pub async fn set_drive_max_file_size(&self, id: &str, max_mb: u64) -> Result<()> {
+        if max_mb.checked_mul(1024 * 1024).is_none() {
+            anyhow::bail!("File size limit is too large");
+        }
         let read_guard = self.drives.read().await;
         let mount = read_guard
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("Drive not found: {}", id))?;
         let mut config = mount.config.write().await;
         config.max_file_size_mb = max_mb;
+        mount
+            .task_queue
+            .max_file_size_mb
+            .store(max_mb, std::sync::atomic::Ordering::SeqCst);
         drop(config);
         drop(read_guard);
         self.persist().await
@@ -1044,6 +1085,8 @@ impl DriveManager {
                 user_id: config.user_id.clone(),
                 status,
                 capacity,
+                approved_http_storage_origins: config.approved_http_storage_origins.clone(),
+                pending_http_storage_origins: self.inventory.pending_storage_origins(drive_id)?,
             });
         }
 
@@ -1061,6 +1104,8 @@ impl DriveManager {
                 user_id: config.user_id.clone(),
                 status: DriveInfoStatus::TransportConsentRequired,
                 capacity: None,
+                approved_http_storage_origins: config.approved_http_storage_origins.clone(),
+                pending_http_storage_origins: Vec::new(),
             });
         }
 

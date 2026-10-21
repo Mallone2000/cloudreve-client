@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 /// an upload, an SSE echo and a download attempt for each one, on top of
 /// polluting the server with files that mean nothing on another machine.
 const DEFAULT_FILE_PATTERNS: &[&str] = &[
+    ".cloudreve-part-*",
+    ".cloudreve-recovery-*",
     // Office / editor temporaries
     "~*",
     ".~lock.*",

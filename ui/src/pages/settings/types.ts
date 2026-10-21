@@ -10,6 +10,8 @@ export interface DriveInfo {
   remote_path: string;
   status: DriveStatus;
   max_file_size_mb?: number;
+  approved_http_storage_origins?: string[];
+  pending_http_storage_origins?: string[];
   capacity?: CapacitySummary;
 }
 

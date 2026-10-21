@@ -146,6 +146,7 @@ impl TestEnv {
             sync_path: sync_dir.clone(),
             enabled: true,
             allow_insecure_http: true,
+            approved_http_storage_origins: vec![server.uri()],
             user_id: "test-user".to_string(),
             ignore_patterns,
             max_file_size_mb,
@@ -247,7 +248,8 @@ impl TestEnv {
         )
         .with_etag(etag)
         .with_size(meta.len() as i64)
-        .with_local_mtime(mtime);
+        .with_local_mtime(mtime)
+        .with_local_fingerprint(&path);
         self.inventory
             .upsert(&entry)
             .expect("upsert inventory entry");

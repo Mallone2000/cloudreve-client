@@ -2,7 +2,7 @@
 
 use crate::uploader::chunk::ChunkInfo;
 use crate::uploader::session::UploadSession;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use bytes::Bytes;
 use futures::Stream;
 use reqwest::{Body, Client as HttpClient};
@@ -75,29 +75,35 @@ where
         .body(body)
         .send()
         .await
+        .map_err(reqwest::Error::without_url)
         .with_context(|| format!("failed to upload chunk {} to Qiniu", chunk.index))?;
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let body = crate::uploader::providers::read_error_body(response).await;
 
         // Try to parse Qiniu error
         if let Ok(error) = serde_json::from_str::<QiniuError>(&body) {
-            bail!("Qiniu error: {}", error.error);
+            let _ = error;
+            return Err(crate::uploader::providers::provider_error(
+                "Qiniu",
+                status.as_u16(),
+                None,
+            ));
         }
 
-        bail!(
-            "Qiniu chunk {} upload failed: HTTP {}: {}",
-            chunk.index,
-            status,
-            body
-        );
+        return Err(crate::uploader::providers::provider_error(
+            "Qiniu",
+            status.as_u16(),
+            None,
+        ));
     }
 
     // Parse response to get ETag
     let chunk_response: QiniuChunkResponse = response
         .json()
         .await
+        .map_err(reqwest::Error::without_url)
         .context("failed to parse Qiniu response")?;
 
     Ok(Some(chunk_response.etag))
@@ -141,18 +147,28 @@ pub async fn complete_upload(http_client: &HttpClient, session: &UploadSession) 
         .json(&request)
         .send()
         .await
+        .map_err(reqwest::Error::without_url)
         .context("failed to complete Qiniu upload")?;
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let body = crate::uploader::providers::read_error_body(response).await;
 
         // Try to parse Qiniu error
         if let Ok(error) = serde_json::from_str::<QiniuError>(&body) {
-            bail!("Qiniu completion error: {}", error.error);
+            let _ = error;
+            return Err(crate::uploader::providers::provider_error(
+                "Qiniu",
+                status.as_u16(),
+                None,
+            ));
         }
 
-        bail!("Qiniu completion failed: HTTP {}: {}", status, body);
+        return Err(crate::uploader::providers::provider_error(
+            "Qiniu",
+            status.as_u16(),
+            None,
+        ));
     }
 
     Ok(())

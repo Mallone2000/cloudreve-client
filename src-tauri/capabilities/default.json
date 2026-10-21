@@ -23,12 +23,12 @@
     "positioner:default",
     "updater:default",
     "process:allow-restart",
-    "app:allow-get-status-summary",
-    "app:allow-show-add-drive-window",
-    "app:allow-show-settings-window",
-    "app:allow-resolve-conflict",
-    "app:allow-pause-sync",
-    "app:allow-resume-sync",
-    "app:allow-show-file-in-explorer"
+    "allow-get-status-summary",
+    "allow-show-add-drive-window",
+    "allow-show-settings-window",
+    "allow-resolve-conflict",
+    "allow-pause-sync",
+    "allow-resume-sync",
+    "allow-show-file-in-explorer"
   ]
 }

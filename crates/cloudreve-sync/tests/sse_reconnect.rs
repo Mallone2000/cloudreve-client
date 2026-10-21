@@ -100,6 +100,34 @@ async fn new_subscription_triggers_full_sync() {
     panic!("a new SSE subscription must trigger a full sync");
 }
 
+#[tokio::test]
+async fn immediately_closed_streams_back_off() {
+    let env = TestEnv::new().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v4/file/events"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("Content-Type", "text/event-stream")
+                .set_body_raw("", "text/event-stream"),
+        )
+        .mount(&env.server)
+        .await;
+    tokio::spawn(run_remote_event_loop(env.mount.clone()));
+    tokio::time::sleep(Duration::from_millis(3_800)).await;
+    let requests = env
+        .server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|request| request.url.path() == "/api/v4/file/events")
+        .count();
+    assert!(
+        (2..=3).contains(&requests),
+        "closed streams reconnected {requests} times"
+    );
+}
+
 /// When a proxy silently drops the connection (half-open socket, no FIN/RST),
 /// the SSE stream stalls — `chunk().await` blocks indefinitely. An idle
 /// timeout must detect this and trigger a reconnection.

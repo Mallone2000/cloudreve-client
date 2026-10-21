@@ -53,7 +53,7 @@ export default function AddDrive({ mode = "add" }: AddDriveProps) {
       if (event.payload.session_id !== oauthSessionRef.current) {
         return;
       }
-      event.payload.name && setDriveName(event.payload.name);
+      if (event.payload.name) setDriveName(event.payload.name);
       setPageState("final_setup");
     }).then((fn) => {
       unlisten = fn;

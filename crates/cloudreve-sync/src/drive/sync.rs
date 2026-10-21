@@ -1,6 +1,6 @@
 use crate::drive::mounts::Mount;
 use crate::drive::utils::{SafeSyncPath, is_partial_download, remote_path_to_local_relative_path};
-use crate::inventory::{FileMetadata, MetadataEntry};
+use crate::inventory::{FileMetadata, LocalFingerprint, MetadataEntry};
 use crate::tasks::TaskPayload;
 use crate::utils::disk_space;
 use crate::utils::toast::send_low_disk_space_toast;
@@ -151,10 +151,19 @@ pub async fn full_sync(mount: &Mount, local_root: &PathBuf, remote_path: &str) -
         .collect();
 
     // 2. Local state
-    let local_files = walk_local(local_root.clone()).await?;
+    let local_files = walk_local_snapshots(local_root.clone()).await?;
     let local_set: HashSet<PathBuf> = local_files
         .iter()
-        .filter_map(|p| p.strip_prefix(local_root).ok().map(|r| r.to_path_buf()))
+        .filter_map(|(p, _)| p.strip_prefix(local_root).ok().map(|r| r.to_path_buf()))
+        .collect();
+    let local_fingerprints: HashMap<PathBuf, LocalFingerprint> = local_files
+        .iter()
+        .filter_map(|(path, fingerprint)| {
+            Some((
+                path.strip_prefix(local_root).ok()?.to_path_buf(),
+                fingerprint.clone()?,
+            ))
+        })
         .collect();
 
     // 3. DB state (last known synced state)
@@ -201,6 +210,7 @@ pub async fn full_sync(mount: &Mount, local_root: &PathBuf, remote_path: &str) -
 
     let drive_uuid = Uuid::parse_str(&mount.id).ok();
     let mut inventory_deletes: Vec<String> = Vec::new();
+    let mut conflict_updates: Vec<(String, crate::inventory::ConflictState)> = Vec::new();
     let mut collision_entries: Vec<MetadataEntry> = Vec::new();
     let mut collision_verifications: Vec<(PathBuf, String)> = Vec::new();
     let mut scheduled_tasks: Vec<TaskPayload> = Vec::new();
@@ -263,12 +273,12 @@ pub async fn full_sync(mount: &Mount, local_root: &PathBuf, remote_path: &str) -
             }
             // New local file → upload
             (false, true, false) => {
-                if let Ok(meta) = std::fs::metadata(&local_path) {
-                    if !mount.is_file_size_allowed(meta.len()).await {
+                if let Some(meta) = local_fingerprints.get(rel) {
+                    if !mount.is_file_size_allowed(meta.size).await {
                         tracing::debug!(
                             target: "drive::sync",
                             path = %rel.display(),
-                            size = meta.len(),
+                            size = meta.size,
                             "Skipping upload: file exceeds size limit"
                         );
                         continue;
@@ -287,7 +297,7 @@ pub async fn full_sync(mount: &Mount, local_root: &PathBuf, remote_path: &str) -
                         );
                         continue;
                     }
-                    if !mount.is_file_size_allowed(rf.size as u64).await {
+                    if rf.size < 0 || !mount.is_file_size_allowed(rf.size as u64).await {
                         tracing::debug!(
                             target: "drive::sync",
                             path = %rel.display(),
@@ -316,10 +326,13 @@ pub async fn full_sync(mount: &Mount, local_root: &PathBuf, remote_path: &str) -
                         .with_created_at(parse_ts(&rf.created_at))
                         .with_updated_at(parse_ts(&rf.updated_at))
                         .with_etag(rf.primary_entity.clone().unwrap_or_default())
-                        .with_size(rf.size)
-                        .with_local_mtime(crate::inventory::local_mtime_secs(&local_path));
-                    let local_size = std::fs::metadata(&local_path)
-                        .map(|m| m.len())
+                        .with_size(rf.size);
+                    if let Some(fingerprint) = local_fingerprints.get(rel) {
+                        entry = entry.with_fingerprint(fingerprint);
+                    }
+                    let local_size = local_fingerprints
+                        .get(rel)
+                        .map(|m| m.size)
                         .unwrap_or(u64::MAX);
                     if local_size != rf.size.max(0) as u64
                         || rf.primary_entity.as_deref().is_none_or(str::is_empty)
@@ -337,15 +350,15 @@ pub async fn full_sync(mount: &Mount, local_root: &PathBuf, remote_path: &str) -
             (true, true, true) => {
                 if let (Some(db_entry), Some(rf)) = (db_map.get(rel), remote_map.get(rel)) {
                     if db_entry.conflict_state == Some(crate::inventory::ConflictState::Verifying) {
-                        if rf.primary_entity.as_deref().is_none_or(str::is_empty) {
-                            mount.inventory.mark_as_conflicted(
-                                &path_str,
-                                Some(crate::inventory::ConflictState::Pending),
-                            )?;
+                        if db_entry.etag.is_empty()
+                            || rf.primary_entity.as_deref() != Some(db_entry.etag.as_str())
+                        {
+                            conflict_updates
+                                .push((path_str.clone(), crate::inventory::ConflictState::Pending));
                         } else {
                             scheduled_tasks.push(
                                 TaskPayload::verify_collision(local_path).with_custom_state(
-                                    serde_json::json!({"remote_etag": rf.primary_entity.clone()}),
+                                    serde_json::json!({"remote_etag": db_entry.etag}),
                                 ),
                             );
                         }
@@ -362,12 +375,39 @@ pub async fn full_sync(mount: &Mount, local_root: &PathBuf, remote_path: &str) -
                         continue;
                     }
 
+                    // Older rows only recorded whole-second mtime. Their
+                    // apparent equality is untrusted until compared bytewise
+                    // with the version they originally recorded.
+                    if !db_entry
+                        .metadata
+                        .contains_key(crate::inventory::LOCAL_FINGERPRINT_KEY)
+                    {
+                        if db_entry.etag.is_empty()
+                            || rf.primary_entity.as_deref() != Some(db_entry.etag.as_str())
+                        {
+                            conflict_updates
+                                .push((path_str.clone(), crate::inventory::ConflictState::Pending));
+                        } else {
+                            conflict_updates.push((
+                                path_str.clone(),
+                                crate::inventory::ConflictState::Verifying,
+                            ));
+                            scheduled_tasks.push(
+                                TaskPayload::verify_collision(local_path).with_custom_state(
+                                    serde_json::json!({"remote_etag": db_entry.etag}),
+                                ),
+                            );
+                        }
+                        continue;
+                    }
+
                     // Check if remote was modified (etag changed)
                     let remote_etag = rf.primary_entity.clone().unwrap_or_default();
                     let remote_changed = !remote_etag.is_empty()
                         && !db_entry.etag.is_empty()
                         && remote_etag != db_entry.etag;
-                    let local_changed = db_entry.is_locally_modified(&local_path);
+                    let local_changed =
+                        db_entry.is_locally_modified_with_fingerprint(local_fingerprints.get(rel));
 
                     // Both sides modified since last sync → conflict, let the user decide
                     if remote_changed && local_changed {
@@ -378,13 +418,8 @@ pub async fn full_sync(mount: &Mount, local_root: &PathBuf, remote_path: &str) -
                             remote_etag = %remote_etag,
                             "Conflict detected: both local and remote modified since last sync"
                         );
-                        mount
-                            .inventory
-                            .mark_as_conflicted(
-                                &path_str,
-                                Some(crate::inventory::ConflictState::Pending),
-                            )
-                            .context("Failed to persist conflict state in inventory")?;
+                        conflict_updates
+                            .push((path_str.clone(), crate::inventory::ConflictState::Pending));
                         crate::utils::toast::send_conflict_toast(
                             &mount.id,
                             &local_path,
@@ -403,7 +438,7 @@ pub async fn full_sync(mount: &Mount, local_root: &PathBuf, remote_path: &str) -
                             );
                             continue;
                         }
-                        if !mount.is_file_size_allowed(rf.size as u64).await {
+                        if rf.size < 0 || !mount.is_file_size_allowed(rf.size as u64).await {
                             tracing::debug!(
                                 target: "drive::sync",
                                 path = %rel.display(),
@@ -427,8 +462,9 @@ pub async fn full_sync(mount: &Mount, local_root: &PathBuf, remote_path: &str) -
                         }
                         scheduled_tasks.push(payload);
                     } else if local_changed {
-                        let local_size = std::fs::metadata(&local_path)
-                            .map(|m| m.len() as i64)
+                        let local_size = local_fingerprints
+                            .get(rel)
+                            .map(|m| m.size as i64)
                             .unwrap_or(0);
                         if !mount.is_file_size_allowed(local_size as u64).await {
                             tracing::debug!(
@@ -452,6 +488,13 @@ pub async fn full_sync(mount: &Mount, local_root: &PathBuf, remote_path: &str) -
             }
             (false, false, false) => {}
         }
+    }
+
+    if !conflict_updates.is_empty() {
+        let inventory = mount.inventory.clone();
+        tokio::task::spawn_blocking(move || inventory.batch_mark_conflicts(&conflict_updates))
+            .await
+            .context("Conflict inventory write panicked")??;
     }
 
     if !collision_entries.is_empty() {
@@ -604,7 +647,12 @@ async fn load_db_entries(
 /// syscall, and on a large sync folder the walk takes long enough that doing it
 /// on a runtime thread stalls every other task on that thread — downloads,
 /// uploads and the UI's status polling included.
-async fn walk_local(root: PathBuf) -> Result<Vec<PathBuf>> {
+async fn walk_local_snapshots(root: PathBuf) -> Result<Vec<(PathBuf, Option<LocalFingerprint>)>> {
+    static SCAN_PERMITS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+    let _permit = SCAN_PERMITS
+        .acquire()
+        .await
+        .context("Local scan worker pool closed")?;
     tokio::task::spawn_blocking(move || {
         let root_is_real_dir = std::fs::symlink_metadata(&root)
             .is_ok_and(|meta| meta.is_dir() && !meta.file_type().is_symlink());
@@ -622,7 +670,20 @@ async fn walk_local(root: PathBuf) -> Result<Vec<PathBuf>> {
     .context("Local walk panicked")?
 }
 
-fn walk_dir_recursive(root: &Path, dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+#[cfg(test)]
+async fn walk_local(root: PathBuf) -> Result<Vec<PathBuf>> {
+    Ok(walk_local_snapshots(root)
+        .await?
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect())
+}
+
+fn walk_dir_recursive(
+    root: &Path,
+    dir: &Path,
+    files: &mut Vec<(PathBuf, Option<LocalFingerprint>)>,
+) -> Result<()> {
     // Only the root is a hard requirement; a subdirectory removed mid-walk is
     // ordinary churn, not a reason to abort the whole sync.
     if !dir.is_dir() {
@@ -645,7 +706,7 @@ fn walk_dir_recursive(root: &Path, dir: &Path, files: &mut Vec<PathBuf>) -> Resu
             walk_dir_recursive(root, &path, files)?;
         } else if !is_partial_download(&path) {
             // A download in flight is not a local file the user created.
-            files.push(path);
+            files.push((path, LocalFingerprint::from_metadata(&metadata)));
         }
     }
     Ok(())

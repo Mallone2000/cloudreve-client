@@ -36,6 +36,8 @@ pub struct DriveConfig {
     /// Old configurations default to false and remain dormant until accepted.
     #[serde(default)]
     pub allow_insecure_http: bool,
+    #[serde(default)]
+    pub approved_http_storage_origins: Vec<String>,
 
     /// List of gitignore-style patterns for files/directories to ignore during sync
     #[serde(default)]
@@ -225,6 +227,7 @@ impl Mount {
             config.max_file_size_mb,
             &config.instance_url,
             config.allow_insecure_http,
+            config.approved_http_storage_origins.clone(),
             summary_notifier,
             &ignore_matcher,
         )
@@ -496,7 +499,10 @@ impl Mount {
     /// Replay the tasks parked while offline, dropping the ones now ignored.
     pub async fn re_enqueue_offline_tasks(&self) -> Result<usize> {
         let matcher = self.ignore_matcher.read().await.clone();
-        self.task_queue.re_enqueue_offline_tasks(&matcher)
+        let queue = self.task_queue.clone();
+        tokio::task::spawn_blocking(move || queue.re_enqueue_offline_tasks(&matcher))
+            .await
+            .context("Offline task replay panicked")?
     }
 
     async fn perform_full_sync(&self) -> Result<()> {
@@ -589,8 +595,9 @@ impl Mount {
         if max_mb == 0 {
             return true; // unlimited
         }
-        let max_bytes = max_mb * 1024 * 1024;
-        size_bytes <= max_bytes
+        max_mb
+            .checked_mul(1024 * 1024)
+            .is_some_and(|max_bytes| size_bytes <= max_bytes)
     }
 
     pub async fn get_sync_path(&self) -> PathBuf {

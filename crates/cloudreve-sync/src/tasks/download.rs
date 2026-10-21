@@ -24,7 +24,9 @@ use uuid::Uuid;
 use crate::{
     drive::{event_blocker::EventBlocker, utils::local_path_to_cr_uri},
     events::SummaryNotifier,
-    inventory::{ConflictState, FileMetadata, InventoryDb, MetadataEntry, local_mtime_secs},
+    inventory::{
+        ConflictState, FileMetadata, InventoryDb, LocalFingerprint, MetadataEntry, local_mtime_secs,
+    },
     tasks::queue::QueuedTask,
     utils::{disk_space, toast::send_conflict_toast},
 };
@@ -154,12 +156,51 @@ pub struct DownloadTask<'a> {
     progress_map: Arc<DashMap<String, TaskProgress>>,
     notifier: Arc<SummaryNotifier>,
     event_blocker: EventBlocker,
-    max_file_size_mb: u64,
+    max_file_size_mb: Arc<AtomicU64>,
     download_client: Arc<reqwest::Client>,
-    approved_http_origin: Option<Url>,
+    approved_http_storage_origins: crate::uploader::transport::StorageApprovals,
+    active_storage_origins: Arc<DashMap<String, String>>,
 }
 
 impl<'a> DownloadTask<'a> {
+    fn allowed_size(&self, bytes: u64) -> Result<bool> {
+        let mb = self.max_file_size_mb.load(Ordering::SeqCst);
+        if mb == 0 {
+            return Ok(true);
+        }
+        let limit = mb
+            .checked_mul(1024 * 1024)
+            .context("File size limit overflows bytes")?;
+        Ok(bytes <= limit)
+    }
+
+    fn surface_conflict(&self, path: &std::path::Path) {
+        if let Some(path_str) = path.to_str() {
+            let result = if let Some(meta) = &self.inventory_meta {
+                self.inventory
+                    .mark_as_conflicted(path_str, Some(ConflictState::Pending))
+                    .map(|_| meta.id)
+            } else if let (Ok(drive), Some(remote)) = (
+                Uuid::parse_str(self.drive_id),
+                self.remote_file_info.as_ref(),
+            ) {
+                let mut entry = MetadataEntry::new(drive, path_str, false)
+                    .with_etag(remote.primary_entity.clone().unwrap_or_default())
+                    .with_size(remote.size)
+                    .with_local_fingerprint(path);
+                entry.conflict_state = Some(ConflictState::Pending);
+                self.inventory.upsert(&entry).map(|_| 0)
+            } else {
+                return;
+            };
+            match result {
+                Ok(id) => send_conflict_toast(self.drive_id, &path.to_path_buf(), id),
+                Err(error) => {
+                    warn!(target: "tasks::download", error = %error, "Failed to persist conflict")
+                }
+            }
+        }
+    }
     pub fn new(
         inventory: Arc<InventoryDb>,
         cr_client: Arc<Client>,
@@ -170,9 +211,10 @@ impl<'a> DownloadTask<'a> {
         progress_map: Arc<DashMap<String, TaskProgress>>,
         notifier: Arc<SummaryNotifier>,
         event_blocker: EventBlocker,
-        max_file_size_mb: u64,
+        max_file_size_mb: Arc<AtomicU64>,
         download_client: Arc<reqwest::Client>,
-        approved_http_origin: Option<Url>,
+        approved_http_storage_origins: crate::uploader::transport::StorageApprovals,
+        active_storage_origins: Arc<DashMap<String, String>>,
     ) -> Self {
         Self {
             inventory,
@@ -189,7 +231,8 @@ impl<'a> DownloadTask<'a> {
             event_blocker,
             max_file_size_mb,
             download_client,
-            approved_http_origin,
+            approved_http_storage_origins,
+            active_storage_origins,
         }
     }
 
@@ -260,20 +303,20 @@ impl<'a> DownloadTask<'a> {
             Err(e) => return Err(anyhow::Error::from(e).context("failed to get remote file info")),
         };
 
-        // Check if the remote file exceeds the drive's size limit
-        if self.max_file_size_mb > 0 {
-            let max_bytes = self.max_file_size_mb * 1024 * 1024;
-            if file_info.size > 0 && (file_info.size as u64) > max_bytes {
-                info!(
-                    target: "tasks::download",
-                    task_id = %self.task.task_id,
-                    path = %local_path.display(),
-                    size = file_info.size,
-                    limit_mb = self.max_file_size_mb,
-                    "Skipping download: file exceeds size limit"
-                );
-                return Ok(());
-            }
+        if file_info.size < 0 {
+            anyhow::bail!("Remote file declares a negative size");
+        }
+        // Check again in the stream: the setting can change while a task runs.
+        if !self.allowed_size(file_info.size as u64)? {
+            info!(
+                target: "tasks::download",
+                task_id = %self.task.task_id,
+                path = %local_path.display(),
+                size = file_info.size,
+                limit_mb = self.max_file_size_mb.load(Ordering::SeqCst),
+                "Skipping download: file exceeds size limit"
+            );
+            return Ok(());
         }
 
         // If the local inventory already tracks this exact remote entity (same etag),
@@ -282,7 +325,10 @@ impl<'a> DownloadTask<'a> {
         if !self.task.payload.force_override {
             if let Some(ref meta) = self.inventory_meta {
                 if let Some(ref remote_etag) = file_info.primary_entity {
-                    if !meta.etag.is_empty() && meta.etag == *remote_etag {
+                    if !meta.etag.is_empty()
+                        && meta.etag == *remote_etag
+                        && !meta.is_locally_modified(&local_path)
+                    {
                         debug!(target: "tasks::download", task_id = %self.task.task_id, path = %local_path.display(), "Local file already matches remote etag, skipping download");
                         return Ok(());
                     }
@@ -306,15 +352,7 @@ impl<'a> DownloadTask<'a> {
                         path = %local_path.display(),
                         "Conflict detected: local file modified while remote also changed"
                     );
-                    if let Some(path_str) = local_path.to_str() {
-                        if let Err(e) = self
-                            .inventory
-                            .mark_as_conflicted(path_str, Some(ConflictState::Pending))
-                        {
-                            warn!(target: "tasks::download", error = ?e, "Failed to mark conflict");
-                        }
-                    }
-                    send_conflict_toast(self.drive_id, &local_path, meta.id);
+                    self.surface_conflict(&local_path);
                     return Ok(());
                 }
             }
@@ -339,6 +377,13 @@ impl<'a> DownloadTask<'a> {
 
         self.remote_file_info = Some(file_info);
 
+        if !self.task.payload.force_override && self.inventory_meta.is_none() && local_path.exists()
+        {
+            self.surface_conflict(&local_path);
+            return Ok(());
+        }
+        let before = LocalFingerprint::from_path(&local_path);
+
         // Get download URL
         let mut request = FileURLService::default();
         request.uris.push(uri.clone());
@@ -362,7 +407,14 @@ impl<'a> DownloadTask<'a> {
             self.cr_client.rewrite_url_origin(&raw)
         };
 
-        validate_download_url(&download_url, &self.approved_http_origin)?;
+        validate_download_url_with_storage(&download_url, &self.approved_http_storage_origins)?;
+        if let Ok(url) = Url::parse(&download_url) {
+            self.active_storage_origins.insert(
+                self.task.task_id.clone(),
+                url.origin().ascii_serialization(),
+            );
+        }
+        validate_download_url_with_storage(&download_url, &self.approved_http_storage_origins)?;
         debug!(target: "tasks::download", task_id = %self.task.task_id, size = file_size, "Got download URL");
 
         let destination =
@@ -395,6 +447,17 @@ impl<'a> DownloadTask<'a> {
 
         match result {
             Ok(()) => {
+                if let Err(error) = validate_download_url_with_storage(
+                    &download_url,
+                    &self.approved_http_storage_origins,
+                ) {
+                    let _ = staged.remove_checked(&self.sync_path);
+                    return Err(error);
+                }
+                if !self.allowed_size(file_size)? {
+                    let _ = staged.remove_checked(&self.sync_path);
+                    anyhow::bail!("Download exceeds current drive limit");
+                }
                 reporter.on_progress(&tracker.create_update());
                 // Block FS events the rename will generate so we don't re-upload the file.
                 // macOS FSEvents can emit an unpredictable number of Create/Modify events
@@ -410,10 +473,100 @@ impl<'a> DownloadTask<'a> {
                     local_path.clone(),
                     block_duration,
                 );
-                // Atomic move temp → final path
-                staged
-                    .rename_checked(&self.sync_path, &destination)
-                    .context("failed to move downloaded file")?;
+                // A user can edit the destination while the network stream is active.
+                if LocalFingerprint::from_path(&local_path) != before {
+                    self.surface_conflict(&local_path);
+                    let _ = staged.remove_checked(&self.sync_path);
+                    return Ok(());
+                }
+                if before.is_some() {
+                    // Probe the filesystem's exclusive rename before touching
+                    // the existing destination. Unsupported filesystems fail
+                    // closed with the original still at its path.
+                    let probe_path = local_path.with_file_name(format!(
+                        "{}probe-{}",
+                        crate::drive::utils::PARTIAL_DOWNLOAD_PREFIX,
+                        Uuid::new_v4()
+                    ));
+                    let probe = crate::drive::utils::SafeSyncPath::from_local(
+                        &probe_path,
+                        &self.sync_path,
+                    )?;
+                    if let Err(error) = staged.rename_exclusive_checked(&self.sync_path, &probe) {
+                        self.surface_conflict(&local_path);
+                        let _ = staged.remove_checked(&self.sync_path);
+                        return Err(
+                            error.context("Exclusive rename unavailable; destination left intact")
+                        );
+                    }
+                    if let Err(error) = probe.rename_exclusive_checked(&self.sync_path, &staged) {
+                        self.surface_conflict(&local_path);
+                        let _ = probe.remove_checked(&self.sync_path);
+                        return Err(
+                            error.context("Exclusive rename probe failed; destination left intact")
+                        );
+                    }
+                    let recovery_path = local_path.with_file_name(format!(
+                        "{}{}-{}",
+                        crate::drive::utils::RECOVERY_DOWNLOAD_PREFIX,
+                        Uuid::new_v4(),
+                        local_path.file_name().unwrap_or_default().to_string_lossy()
+                    ));
+                    let recovery = crate::drive::utils::SafeSyncPath::from_local(
+                        &recovery_path,
+                        &self.sync_path,
+                    )?;
+                    if let Err(error) =
+                        destination.rename_exclusive_checked(&self.sync_path, &recovery)
+                    {
+                        self.surface_conflict(&local_path);
+                        let _ = staged.remove_checked(&self.sync_path);
+                        return Err(error.context("Failed to preserve existing destination"));
+                    }
+                    let recovery_after_move = LocalFingerprint::from_path(&recovery_path);
+                    if !before
+                        .as_ref()
+                        .zip(recovery_after_move.as_ref())
+                        .is_some_and(|(before, after)| before.matches_after_rename(after))
+                    {
+                        self.surface_conflict(&local_path);
+                        let _ = staged.remove_checked(&self.sync_path);
+                        anyhow::bail!(
+                            "Local file changed during installation; recovery copy retained"
+                        );
+                    }
+                    if let Err(error) = validate_download_url_with_storage(
+                        &download_url,
+                        &self.approved_http_storage_origins,
+                    ) {
+                        let _ = staged.remove_checked(&self.sync_path);
+                        let _ = recovery.rename_exclusive_checked(&self.sync_path, &destination);
+                        return Err(error.context("Storage approval changed during installation"));
+                    }
+                    if LocalFingerprint::from_path(&recovery_path) != recovery_after_move {
+                        self.surface_conflict(&local_path);
+                        let _ = staged.remove_checked(&self.sync_path);
+                        anyhow::bail!(
+                            "Recovery copy changed during installation; retained for review"
+                        );
+                    }
+                    if let Err(error) =
+                        staged.rename_exclusive_checked(&self.sync_path, &destination)
+                    {
+                        self.surface_conflict(&local_path);
+                        let _ = staged.remove_checked(&self.sync_path);
+                        return Err(error.context(
+                            "Downloaded file could not be installed; recovery copy retained",
+                        ));
+                    }
+                    let _ = recovery.remove_checked(&self.sync_path);
+                } else if let Err(error) =
+                    staged.rename_exclusive_checked(&self.sync_path, &destination)
+                {
+                    self.surface_conflict(&local_path);
+                    let _ = staged.remove_checked(&self.sync_path);
+                    return Err(error.context("Downloaded file could not be installed"));
+                }
                 info!(target: "tasks::download", task_id = %self.task.task_id, path = %local_path.display(), "Download complete");
                 // Update inventory so 3-way sync knows this file was last synced now
                 if let Some(file_info) = &self.remote_file_info {
@@ -429,7 +582,8 @@ impl<'a> DownloadTask<'a> {
                             .with_updated_at(parse_ts(&file_info.updated_at))
                             .with_etag(file_info.primary_entity.clone().unwrap_or_default())
                             .with_size(file_info.size)
-                            .with_local_mtime(local_mtime_secs(&local_path));
+                            .with_local_mtime(local_mtime_secs(&local_path))
+                            .with_local_fingerprint(&local_path);
                         if let Err(e) = self.inventory.upsert(&entry) {
                             warn!(target: "tasks::download", task_id = %self.task.task_id, error = %e, "Failed to update inventory after download");
                         }
@@ -474,12 +628,20 @@ impl<'a> DownloadTask<'a> {
         const REPORT_INTERVAL: Duration = Duration::from_millis(200);
 
         while let Some(chunk_result) = stream.next().await {
+            validate_download_url_with_storage(url, &self.approved_http_storage_origins)?;
             if self.cancel_token.is_cancelled() {
                 anyhow::bail!("Download cancelled");
             }
             let chunk = chunk_result
                 .map_err(reqwest::Error::without_url)
                 .context("Failed to read download chunk")?;
+            let next = tracker
+                .downloaded()
+                .checked_add(chunk.len() as u64)
+                .context("Download byte count overflow")?;
+            if next > tracker.total_size || !self.allowed_size(next)? {
+                anyhow::bail!("Download exceeds declared size or current drive limit");
+            }
             file.write_all(&chunk)
                 .await
                 .context("failed to write chunk")?;
@@ -490,37 +652,29 @@ impl<'a> DownloadTask<'a> {
             }
         }
 
+        if tracker.downloaded() != tracker.total_size {
+            anyhow::bail!("Download byte count differs from declared size");
+        }
+        validate_download_url_with_storage(url, &self.approved_http_storage_origins)?;
         file.flush().await.context("failed to flush temp file")?;
         Ok(())
     }
 }
 
-pub(crate) fn validate_download_url(raw: &str, approved_http_origin: &Option<Url>) -> Result<()> {
-    let url = Url::parse(raw).context("Invalid signed download URL")?;
-    if url.scheme() == "https" {
-        return Ok(());
-    }
-    if url.scheme() == "http"
-        && approved_http_origin
-            .as_ref()
-            .is_some_and(|allowed| url.origin() == allowed.origin())
-    {
-        return Ok(());
-    }
-    anyhow::bail!("Signed download URL uses an unapproved insecure origin")
+pub(crate) fn validate_download_url_with_storage(
+    raw: &str,
+    approvals: &crate::uploader::transport::StorageApprovals,
+) -> Result<()> {
+    crate::uploader::transport::validate_provider_url(raw, approvals)
 }
 
 pub(crate) fn allowed_download_redirect(
     initial: &Url,
     next: &Url,
-    approved_http_origin: &Option<Url>,
+    approvals: &crate::uploader::transport::StorageApprovals,
 ) -> bool {
     initial.origin() == next.origin()
-        && (next.scheme() == "https"
-            || (next.scheme() == "http"
-                && approved_http_origin
-                    .as_ref()
-                    .is_some_and(|allowed| next.origin() == allowed.origin())))
+        && validate_download_url_with_storage(next.as_str(), approvals).is_ok()
 }
 
 #[cfg(test)]
@@ -540,15 +694,27 @@ mod url_policy_tests {
 
     #[test]
     fn signed_cdn_https_is_allowed_but_insecure_cross_origin_is_rejected() {
-        let approved = Some(Url::parse("http://cloud.example:5212").unwrap());
+        let approved = Arc::new(std::sync::RwLock::new(std::collections::HashSet::from([
+            "http://cloud.example:5212".to_string(),
+        ])));
         assert!(
-            validate_download_url("https://cdn.example.net/file?signature=abc", &approved).is_ok()
+            validate_download_url_with_storage(
+                "https://cdn.example.net/file?signature=abc",
+                &approved
+            )
+            .is_ok()
         );
-        assert!(validate_download_url("http://cloud.example:5212/file", &approved).is_ok());
         assert!(
-            validate_download_url("http://cdn.example.net/file?signature=abc", &approved).is_err()
+            validate_download_url_with_storage("http://cloud.example:5212/file", &approved).is_ok()
         );
-        assert!(validate_download_url("file:///tmp/secret", &approved).is_err());
+        assert!(
+            validate_download_url_with_storage(
+                "http://cdn.example.net/file?signature=abc",
+                &approved
+            )
+            .is_err()
+        );
+        assert!(validate_download_url_with_storage("file:///tmp/secret", &approved).is_err());
         let signed = Url::parse("https://cdn.example.net/file?signature=abc").unwrap();
         assert!(allowed_download_redirect(
             &signed,

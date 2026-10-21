@@ -4,7 +4,12 @@ use cloudreve_api::{
     api::explorer::FileEventsApi,
     models::explorer::{FileEvent, FileEventData, FileEventType},
 };
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 const INITIAL_BACKOFF_SECS: u64 = 1;
 // Cap low enough that the client recovers quickly once the server is back:
@@ -33,11 +38,15 @@ impl BackoffState {
     }
 
     fn next_delay(&mut self) -> Duration {
-        let delay = self.current_delay;
+        let base = self.current_delay;
         self.retry_count = self.retry_count.saturating_add(1);
         self.current_delay =
             Duration::from_secs((self.current_delay.as_secs() * 2).min(MAX_BACKOFF_SECS));
-        delay
+        let jitter_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|value| value.subsec_nanos() as u64 % 250)
+            .unwrap_or(0);
+        (base + Duration::from_millis(jitter_ms)).min(Duration::from_secs(MAX_BACKOFF_SECS))
     }
 }
 
@@ -56,11 +65,7 @@ mod backoff_tests {
             assert!(delay <= Duration::from_secs(MAX_BACKOFF_SECS));
             last = delay;
         }
-        assert_eq!(
-            last,
-            Duration::from_secs(MAX_BACKOFF_SECS),
-            "repeated failures must settle at the max delay, not stop"
-        );
+        assert_eq!(last, Duration::from_secs(MAX_BACKOFF_SECS));
     }
 
     /// A successful connection resets the backoff to the initial delay.
@@ -71,10 +76,7 @@ mod backoff_tests {
             backoff.next_delay();
         }
         backoff.reset();
-        assert_eq!(
-            backoff.next_delay(),
-            Duration::from_secs(INITIAL_BACKOFF_SECS)
-        );
+        assert!(backoff.next_delay() < Duration::from_secs(2));
     }
 }
 
@@ -100,20 +102,20 @@ impl Mount {
         };
 
         loop {
+            let started = Instant::now();
             let result = s.listen_remote_events().await;
+            if started.elapsed() >= Duration::from_secs(30) {
+                backoff.reset();
+            }
+            let delay = backoff.next_delay();
             match result {
                 ListenResult::ReconnectRequired => {
-                    tracing::info!(target: "drive::remote_events", "Reconnect required, re-subscribing immediately");
-                    backoff.reset();
-                    continue;
+                    tracing::info!(target: "drive::remote_events", "Reconnect requested; applying reconnect delay");
                 }
                 ListenResult::StreamEnded => {
                     tracing::warn!(target: "drive::remote_events", "Event stream ended unexpectedly, reconnecting");
-                    backoff.reset();
-                    continue;
                 }
                 ListenResult::Error(e) => {
-                    let delay = backoff.next_delay();
                     tracing::error!(
                         target: "drive::remote_events",
                         error = %e,
@@ -121,9 +123,9 @@ impl Mount {
                         delay_secs = delay.as_secs(),
                         "Failed to listen to remote events, retrying"
                     );
-                    tokio::time::sleep(delay).await;
                 }
             }
+            tokio::time::sleep(delay).await;
         }
     }
 

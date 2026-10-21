@@ -8,12 +8,11 @@ use cloudreve_api::{
 };
 use futures::StreamExt;
 use tokio::io::AsyncReadExt;
-use url::Url;
 
 use crate::{
     drive::utils::{SafeSyncPath, local_path_to_cr_uri},
     inventory::{ConflictState, InventoryDb},
-    tasks::{download::validate_download_url, queue::QueuedTask},
+    tasks::{download::validate_download_url_with_storage, queue::QueuedTask},
     utils::toast::send_conflict_toast,
 };
 
@@ -51,7 +50,8 @@ pub async fn execute(
     inventory: Arc<InventoryDb>,
     client: Arc<Client>,
     download_client: Arc<reqwest::Client>,
-    approved_http_origin: &Option<Url>,
+    approved_http_storage_origins: &crate::uploader::transport::StorageApprovals,
+    active_storage_origins: &std::sync::Arc<dashmap::DashMap<String, String>>,
     drive_id: &str,
     sync_root: &PathBuf,
     remote_base: &str,
@@ -98,9 +98,13 @@ pub async fn execute(
         .url
         .clone();
     let signed = client.rewrite_url_origin(&signed);
-    validate_download_url(&signed, approved_http_origin)?;
+    validate_download_url_with_storage(&signed, approved_http_storage_origins)?;
+    if let Ok(url) = url::Url::parse(&signed) {
+        active_storage_origins.insert(task.task_id.clone(), url.origin().ascii_serialization());
+    }
+    validate_download_url_with_storage(&signed, approved_http_storage_origins)?;
     let response = download_client
-        .get(signed)
+        .get(&signed)
         .send()
         .await
         .map_err(reqwest::Error::without_url)
@@ -122,6 +126,7 @@ pub async fn execute(
     let mut compared = 0u64;
     let mut buffer = Vec::new();
     while let Some(chunk) = stream.next().await {
+        validate_download_url_with_storage(&signed, approved_http_storage_origins)?;
         let chunk = chunk
             .map_err(reqwest::Error::without_url)
             .context("Failed to read collision comparison")?;
@@ -134,6 +139,7 @@ pub async fn execute(
             compared = compared.saturating_add(piece.len() as u64);
         }
     }
+    validate_download_url_with_storage(&signed, approved_http_storage_origins)?;
     let mut trailing = [0u8; 1];
     if compared != before.len() || local.read(&mut trailing).await? != 0 {
         mark_conflict(&inventory, drive_id, &path)?;
@@ -148,7 +154,12 @@ pub async fn execute(
         mark_conflict(&inventory, drive_id, &path)?;
         return Ok(());
     }
-    inventory.mark_as_conflicted(path.to_str().context("Invalid local path")?, None)?;
+    let path_str = path.to_str().context("Invalid local path")?;
+    if let Some(row) = inventory.query_by_path(path_str)? {
+        let mut entry = crate::inventory::MetadataEntry::from(&row).with_local_fingerprint(&path);
+        entry.conflict_state = None;
+        inventory.upsert(&entry)?;
+    }
     Ok(())
 }
 

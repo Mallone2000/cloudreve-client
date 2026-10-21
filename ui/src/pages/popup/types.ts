@@ -29,6 +29,8 @@ export interface TaskRecord {
   total_bytes: number;
   processed_bytes: number;
   error?: string;
+  blocked_reason?: "offline" | "storage_consent" | null;
+  blocked_origin?: string | null;
   custom_state?: Record<string, unknown>;
   created_at: number;
   updated_at: number;

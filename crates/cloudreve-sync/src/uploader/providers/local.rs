@@ -100,12 +100,16 @@ where
         .body(body)
         .send()
         .await
+        .map_err(reqwest::Error::without_url)
         .context("failed to upload chunk")?;
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!("HTTP {}: {}", status, body));
+        return Err(crate::uploader::providers::provider_error(
+            "Remote",
+            status.as_u16(),
+            None,
+        ));
     }
 
     // Parse response to check for errors
@@ -116,10 +120,14 @@ where
         msg: String,
     }
 
-    let response_text = response.text().await.unwrap_or_default();
+    let response_text = crate::uploader::providers::read_error_body(response).await;
     if let Ok(resp) = serde_json::from_str::<SlaveResponse>(&response_text) {
         if resp.code != 0 {
-            return Err(anyhow::anyhow!("Slave error ({}): {}", resp.code, resp.msg));
+            return Err(crate::uploader::providers::provider_error(
+                "Remote",
+                200,
+                Some(&resp.code.to_string()),
+            ));
         }
     }
 

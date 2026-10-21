@@ -4,7 +4,7 @@
 
 use crate::uploader::chunk::{ChunkInfo, ChunkProgress};
 use crate::uploader::session::UploadSession;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use bytes::Bytes;
 use cloudreve_api::Client as CrClient;
 use cloudreve_api::api::ExplorerApi;
@@ -45,16 +45,14 @@ where
         .body(body)
         .send()
         .await
+        .map_err(reqwest::Error::without_url)
         .with_context(|| format!("failed to upload chunk {}", chunk.index))?;
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        bail!(
-            "chunk {} upload failed: {}",
-            chunk.index,
-            format_s3_error(status.as_u16(), &body)
-        );
+        let body = crate::uploader::providers::read_error_body(response).await;
+        return Err(parse_s3_error(status.as_u16(), &body)
+            .context(format!("chunk {} upload failed", chunk.index)));
     }
 
     // Extract ETag from response headers
@@ -126,15 +124,13 @@ pub async fn complete_upload_oss(http_client: &HttpClient, session: &UploadSessi
         .header("x-oss-complete-all", "yes")
         .send()
         .await
+        .map_err(reqwest::Error::without_url)
         .context("failed to complete OSS upload")?;
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        bail!(
-            "failed to complete OSS upload: {}",
-            format_s3_error(status.as_u16(), &body)
-        );
+        let body = crate::uploader::providers::read_error_body(response).await;
+        return Err(parse_s3_error(status.as_u16(), &body).context("failed to complete OSS upload"));
     }
 
     Ok(())
@@ -166,14 +162,14 @@ pub async fn complete_upload_s3like(
     let response = request
         .send()
         .await
+        .map_err(reqwest::Error::without_url)
         .context("failed to complete S3-like upload")?;
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        bail!(
-            "failed to complete S3-like upload: {}",
-            format_s3_error(status.as_u16(), &body)
+        let body = crate::uploader::providers::read_error_body(response).await;
+        return Err(
+            parse_s3_error(status.as_u16(), &body).context("failed to complete S3-like upload")
         );
     }
 
@@ -196,11 +192,12 @@ pub async fn complete_upload_obs(http_client: &HttpClient, session: &UploadSessi
         .body(body)
         .send()
         .await
+        .map_err(reqwest::Error::without_url)
         .context("failed to complete OBS upload")?;
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let body = crate::uploader::providers::read_error_body(response).await;
 
         // OBS may return JSON or XML errors
         if body.starts_with('{') {
@@ -210,14 +207,15 @@ pub async fn complete_upload_obs(http_client: &HttpClient, session: &UploadSessi
                 code: String,
             }
             if let Ok(err) = serde_json::from_str::<ObsError>(&body) {
-                bail!("OBS error ({}): {}", err.code, err.message);
+                return Err(crate::uploader::providers::provider_error(
+                    "OBS",
+                    status.as_u16(),
+                    Some(&err.code),
+                ));
             }
         }
 
-        bail!(
-            "failed to complete OBS upload: {}",
-            format_s3_error(status.as_u16(), &body)
-        );
+        return Err(parse_s3_error(status.as_u16(), &body).context("failed to complete OBS upload"));
     }
 
     Ok(())
@@ -261,16 +259,13 @@ fn build_complete_multipart_xml(chunks: &[ChunkProgress]) -> String {
     xml
 }
 
-/// Format S3 error response for display
-fn format_s3_error(status: u16, body: &str) -> String {
+/// Parse a bounded provider response without retaining its raw contents.
+fn parse_s3_error(status: u16, body: &str) -> anyhow::Error {
     // Try to parse XML error
     if let Some(code) = extract_xml_element(body, "Code") {
-        if let Some(message) = extract_xml_element(body, "Message") {
-            return format!("S3 error ({}): {}", code, message);
-        }
+        return crate::uploader::providers::provider_error("S3", status, Some(&code));
     }
-
-    format!("HTTP {}: {}", status, body)
+    crate::uploader::providers::provider_error("S3", status, None)
 }
 
 /// Simple XML element extraction (for error parsing)

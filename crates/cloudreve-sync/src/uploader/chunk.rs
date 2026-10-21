@@ -496,13 +496,13 @@ impl ChunkUploader {
         }
 
         // Check if there was an error
-        if let Some(error_msg) = pool_state.get_error() {
+        if let Some(error) = pool_state.take_error() {
             error!(
                 target: "uploader::chunk",
-                error = %error_msg,
+                diagnostic = %providers::safe_upload_diagnostic(&error),
                 "Upload failed"
             );
-            return Err(anyhow::anyhow!("Upload failed: {}", error_msg));
+            return Err(error);
         }
 
         info!(
@@ -596,12 +596,12 @@ impl ChunkUploader {
                         error!(
                             target: "uploader::chunk",
                             chunk = chunk_index,
-                            error = ?e,
+                            diagnostic = %providers::safe_upload_diagnostic(&e),
                             "Chunk upload failed, stopping all uploads"
                         );
 
                         // Mark error state to stop all uploads
-                        pool_state.set_error(e.to_string());
+                        pool_state.set_error(e);
                         cancel_token.cancel();
                         pool_state.worker_done();
                         return;
@@ -629,8 +629,8 @@ struct ChunkProgressState {
 struct UploadPoolState {
     /// Chunks waiting to be uploaded
     pending_chunks: Mutex<Vec<ChunkInfo>>,
-    /// Error message if any upload failed
-    error: Mutex<Option<String>>,
+    /// First structured error from a worker.
+    error: std::sync::Mutex<Option<anyhow::Error>>,
     /// Flag indicating an error occurred
     has_error: AtomicBool,
     /// Number of active workers
@@ -643,7 +643,7 @@ impl UploadPoolState {
     fn new(chunks: Vec<ChunkInfo>) -> Self {
         Self {
             pending_chunks: Mutex::new(chunks),
-            error: Mutex::new(None),
+            error: std::sync::Mutex::new(None),
             has_error: AtomicBool::new(false),
             active_workers: AtomicUsize::new(0),
             all_done: Notify::new(),
@@ -673,18 +673,18 @@ impl UploadPoolState {
     }
 
     /// Set error state
-    fn set_error(&self, msg: String) {
+    fn set_error(&self, error: anyhow::Error) {
         self.has_error.store(true, Ordering::SeqCst);
-        if let Ok(mut error) = self.error.try_lock() {
-            if error.is_none() {
-                *error = Some(msg);
+        if let Ok(mut slot) = self.error.lock() {
+            if slot.is_none() {
+                *slot = Some(error);
             }
         }
     }
 
-    /// Get the error message if any
-    fn get_error(&self) -> Option<String> {
-        self.error.try_lock().ok().and_then(|e| e.clone())
+    /// Take the original error, preserving consent and provider status types.
+    fn take_error(&self) -> Option<anyhow::Error> {
+        self.error.lock().ok().and_then(|mut error| error.take())
     }
 
     /// Get current active worker count
@@ -760,6 +760,10 @@ async fn upload_chunk_with_retry(
         }
 
         // Create a fresh stream for each attempt
+        crate::uploader::transport::validate_session(
+            session,
+            &config.approved_http_storage_origins,
+        )?;
         let inner_stream =
             ChunkStream::from_chunk(local_path, sync_root, chunk, encryption.clone())
                 .await
@@ -799,7 +803,7 @@ async fn upload_chunk_with_retry(
                     error!(
                         target: "uploader::chunk",
                         chunk = chunk.index,
-                        error = ?e,
+                        diagnostic = %providers::safe_upload_diagnostic(&e),
                         attempt,
                         "Chunk upload failed after retries"
                     );
@@ -808,7 +812,7 @@ async fn upload_chunk_with_retry(
                 warn!(
                     target: "uploader::chunk",
                     chunk = chunk.index,
-                    error = ?e,
+                    diagnostic = %providers::safe_upload_diagnostic(&e),
                     attempt,
                     "Chunk upload failed, will retry"
                 );

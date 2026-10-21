@@ -226,6 +226,8 @@ pub struct DriveInfo {
     pub status: DriveInfoStatus,
     /// Capacity summary (None if not available)
     pub capacity: Option<CapacitySummary>,
+    pub approved_http_storage_origins: Vec<String>,
+    pub pending_http_storage_origins: Vec<String>,
 }
 
 /// Drive status for the settings UI

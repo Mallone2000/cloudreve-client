@@ -13,10 +13,81 @@ use bytes::Bytes;
 use cloudreve_api::Client as CrClient;
 use cloudreve_api::models::explorer::PolicyType as ApiPolicyType;
 use futures::Stream;
+use futures::StreamExt;
 use reqwest::Client as HttpClient;
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Bound diagnostic parsing even when a provider sends an enormous error page.
+async fn read_error_body(response: reqwest::Response) -> String {
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(Ok(chunk)) = stream.next().await {
+        let remaining = 4096usize.saturating_sub(bytes.len());
+        bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        if bytes.len() == 4096 {
+            break;
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+#[derive(Debug)]
+pub(crate) struct ProviderStatusError {
+    provider: &'static str,
+    status: u16,
+    code: Option<String>,
+}
+impl std::fmt::Display for ProviderStatusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} HTTP {}", self.provider, self.status)?;
+        if let Some(code) = &self.code {
+            write!(f, " ({code})")?;
+        }
+        Ok(())
+    }
+}
+impl std::error::Error for ProviderStatusError {}
+
+pub(crate) fn safe_upload_diagnostic(error: &anyhow::Error) -> String {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<ProviderStatusError>())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "Upload request failed".to_string())
+}
+
+fn provider_error(provider: &'static str, status: u16, code: Option<&str>) -> anyhow::Error {
+    let code = code
+        .filter(|code| {
+            code.len() <= 64
+                && code
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        })
+        .map(str::to_string);
+    ProviderStatusError {
+        provider,
+        status,
+        code,
+    }
+    .into()
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn provider_diagnostics_never_include_signed_urls_or_bodies() {
+        let signed = "https://storage.example/object?signature=SIGNED_SENTINEL";
+        let error = provider_error("S3", 403, Some(signed));
+        let diagnostic = safe_upload_diagnostic(&error);
+        assert_eq!(diagnostic, "S3 HTTP 403");
+        assert!(!format!("{error:?}").contains("SIGNED_SENTINEL"));
+    }
+}
 
 /// Supported storage policy types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

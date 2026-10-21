@@ -1,5 +1,5 @@
 use super::InventoryDb;
-use crate::inventory::{NewTaskRecord, TaskRecord, TaskStatus, TaskUpdate};
+use crate::inventory::{BlockedReason, NewTaskRecord, TaskRecord, TaskStatus, TaskUpdate};
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use diesel::prelude::*;
@@ -7,6 +7,173 @@ use diesel::prelude::*;
 use crate::inventory::schema::task_queue::{self, dsl as task_queue_dsl};
 
 impl InventoryDb {
+    /// Atomically reserve only the rows that can run now. The database is the
+    /// queue; callers never retain a copy of the pending backlog in memory.
+    pub fn claim_eligible_tasks(&self, drive: &str, limit: usize) -> Result<Vec<TaskRecord>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut conn = self.connection()?;
+        (&mut *conn).transaction::<Vec<TaskRecord>, anyhow::Error, _>(|tx| {
+            let mut rows: Vec<TaskRow> = task_queue_dsl::task_queue
+                .filter(task_queue_dsl::drive_id.eq(drive))
+                .filter(task_queue_dsl::status.eq(TaskStatus::Pending.as_str()))
+                .filter(task_queue_dsl::blocked_reason.is_null())
+                .filter(task_queue_dsl::task_type.ne("verify_collision"))
+                .order((
+                    task_queue_dsl::priority.desc(),
+                    task_queue_dsl::created_at.asc(),
+                    task_queue_dsl::id.asc(),
+                ))
+                .limit(limit.min(1024) as i64)
+                .load(tx)?;
+            if rows.len() < limit {
+                let verifying: i64 = task_queue_dsl::task_queue
+                    .filter(task_queue_dsl::drive_id.eq(drive))
+                    .filter(task_queue_dsl::status.eq("running"))
+                    .filter(task_queue_dsl::task_type.eq("verify_collision"))
+                    .count()
+                    .get_result(tx)?;
+                if verifying == 0 {
+                    if let Some(row) = task_queue_dsl::task_queue
+                        .filter(task_queue_dsl::drive_id.eq(drive))
+                        .filter(task_queue_dsl::status.eq("pending"))
+                        .filter(task_queue_dsl::blocked_reason.is_null())
+                        .filter(task_queue_dsl::task_type.eq("verify_collision"))
+                        .order((task_queue_dsl::created_at.asc(), task_queue_dsl::id.asc()))
+                        .first::<TaskRow>(tx)
+                        .optional()?
+                    {
+                        rows.push(row);
+                    }
+                }
+            }
+            let ids: Vec<_> = rows.iter().map(|row| row.id.as_str()).collect();
+            if !ids.is_empty() {
+                diesel::update(task_queue_dsl::task_queue.filter(task_queue_dsl::id.eq_any(ids)))
+                    .set((
+                        task_queue_dsl::status.eq(TaskStatus::Running.as_str()),
+                        task_queue_dsl::updated_at.eq(Utc::now().timestamp()),
+                    ))
+                    .execute(tx)?;
+            }
+            rows.into_iter()
+                .map(|mut row| {
+                    row.status = TaskStatus::Running.as_str().to_string();
+                    TaskRecord::try_from(row)
+                })
+                .collect()
+        })
+    }
+
+    pub fn reset_running_tasks(&self, drive: &str) -> Result<usize> {
+        let mut conn = self.connection()?;
+        Ok(diesel::update(
+            task_queue_dsl::task_queue
+                .filter(task_queue_dsl::drive_id.eq(drive))
+                .filter(task_queue_dsl::status.eq(TaskStatus::Running.as_str())),
+        )
+        .set(task_queue_dsl::status.eq(TaskStatus::Pending.as_str()))
+        .execute(&mut conn)?)
+    }
+
+    pub fn pending_paths_page(
+        &self,
+        drive: &str,
+        after_id: &str,
+        limit: i64,
+    ) -> Result<Vec<(String, String)>> {
+        let mut conn = self.connection()?;
+        Ok(task_queue_dsl::task_queue
+            .filter(task_queue_dsl::drive_id.eq(drive))
+            .filter(task_queue_dsl::status.eq("pending"))
+            .filter(task_queue_dsl::id.gt(after_id))
+            .order(task_queue_dsl::id.asc())
+            .limit(limit)
+            .select((task_queue_dsl::id, task_queue_dsl::local_path))
+            .load(&mut conn)?)
+    }
+
+    pub fn mark_legacy_offline_tasks(&self, drive: &str) -> Result<usize> {
+        let mut conn = self.connection()?;
+        Ok(diesel::sql_query("UPDATE task_queue SET blocked_reason = 'offline' WHERE drive_id = ? AND status = 'pending' AND blocked_reason IS NULL AND json_extract(custom_state, '$.offline_waiting') = 1")
+            .bind::<diesel::sql_types::Text, _>(drive)
+            .execute(&mut conn)?)
+    }
+
+    pub fn clear_legacy_offline_flags(&self, drive: &str) -> Result<()> {
+        let mut conn = self.connection()?;
+        diesel::sql_query("UPDATE task_queue SET custom_state = CASE WHEN json_remove(custom_state, '$.offline_waiting') = '{}' THEN NULL ELSE json_remove(custom_state, '$.offline_waiting') END WHERE drive_id = ? AND json_extract(custom_state, '$.offline_waiting') = 1")
+            .bind::<diesel::sql_types::Text, _>(drive)
+            .execute(&mut conn)?;
+        Ok(())
+    }
+
+    pub fn set_offline_block(&self, drive: &str, offline: bool) -> Result<usize> {
+        let mut conn = self.connection()?;
+        let query = task_queue_dsl::task_queue.filter(task_queue_dsl::drive_id.eq(drive));
+        if offline {
+            Ok(
+                diesel::update(query.filter(task_queue_dsl::status.eq_any(["pending", "running"])))
+                    .set((
+                        task_queue_dsl::status.eq("pending"),
+                        task_queue_dsl::blocked_reason.eq(Some("offline")),
+                    ))
+                    .execute(&mut conn)?,
+            )
+        } else {
+            Ok(diesel::update(
+                query
+                    .filter(task_queue_dsl::status.eq("pending"))
+                    .filter(task_queue_dsl::blocked_reason.eq("offline")),
+            )
+            .set(task_queue_dsl::blocked_reason.eq(None::<String>))
+            .execute(&mut conn)?)
+        }
+    }
+
+    pub fn clear_storage_block(&self, drive: &str, origin: &str) -> Result<usize> {
+        let mut conn = self.connection()?;
+        Ok(diesel::update(
+            task_queue_dsl::task_queue
+                .filter(task_queue_dsl::drive_id.eq(drive))
+                .filter(task_queue_dsl::status.eq("pending"))
+                .filter(task_queue_dsl::blocked_reason.eq("storage_consent"))
+                .filter(task_queue_dsl::blocked_origin.eq(origin)),
+        )
+        .set((
+            task_queue_dsl::blocked_reason.eq(None::<String>),
+            task_queue_dsl::blocked_origin.eq(None::<String>),
+        ))
+        .execute(&mut conn)?)
+    }
+
+    pub fn pending_storage_origins(&self, drive: &str) -> Result<Vec<String>> {
+        let mut conn = self.connection()?;
+        Ok(task_queue_dsl::task_queue
+            .filter(task_queue_dsl::drive_id.eq(drive))
+            .filter(task_queue_dsl::status.eq("pending"))
+            .filter(task_queue_dsl::blocked_reason.eq("storage_consent"))
+            .select(task_queue_dsl::blocked_origin)
+            .distinct()
+            .load::<Option<String>>(&mut conn)?
+            .into_iter()
+            .flatten()
+            .collect())
+    }
+
+    pub fn cancel_storage_block(&self, drive: &str, origin: &str) -> Result<usize> {
+        let mut conn = self.connection()?;
+        Ok(diesel::update(
+            task_queue_dsl::task_queue
+                .filter(task_queue_dsl::drive_id.eq(drive))
+                .filter(task_queue_dsl::status.eq("pending"))
+                .filter(task_queue_dsl::blocked_reason.eq("storage_consent"))
+                .filter(task_queue_dsl::blocked_origin.eq(origin)),
+        )
+        .set(task_queue_dsl::status.eq("cancelled"))
+        .execute(&mut conn)?)
+    }
     /// Insert a reconciliation batch with one SQLite transaction. The result
     /// aligns with `tasks`; false means an active duplicate or a failed
     /// download of the same remote entity already exists.
@@ -346,6 +513,8 @@ struct TaskRow {
     error: Option<String>,
     created_at: i64,
     updated_at: i64,
+    blocked_reason: Option<String>,
+    blocked_origin: Option<String>,
 }
 
 impl TryFrom<TaskRow> for TaskRecord {
@@ -375,6 +544,11 @@ impl TryFrom<TaskRow> for TaskRecord {
             error: row.error,
             created_at: row.created_at,
             updated_at: row.updated_at,
+            blocked_reason: row
+                .blocked_reason
+                .as_deref()
+                .and_then(BlockedReason::from_str),
+            blocked_origin: row.blocked_origin,
         })
     }
 }
@@ -395,6 +569,8 @@ struct NewTaskRow {
     error: Option<String>,
     created_at: i64,
     updated_at: i64,
+    blocked_reason: Option<String>,
+    blocked_origin: Option<String>,
 }
 
 impl TryFrom<&NewTaskRecord> for NewTaskRow {
@@ -421,6 +597,10 @@ impl TryFrom<&NewTaskRecord> for NewTaskRow {
             error: record.error.clone(),
             created_at: record.created_at,
             updated_at: record.updated_at,
+            blocked_reason: record
+                .blocked_reason
+                .map(|reason| reason.as_str().to_string()),
+            blocked_origin: record.blocked_origin.clone(),
         })
     }
 }
@@ -435,6 +615,8 @@ struct TaskChangeset {
     custom_state: Option<Option<String>>,
     error: Option<Option<String>>,
     updated_at: i64,
+    blocked_reason: Option<Option<String>>,
+    blocked_origin: Option<Option<String>>,
 }
 
 impl TaskChangeset {
@@ -461,6 +643,10 @@ impl TaskChangeset {
             custom_state,
             error: error_state,
             updated_at: Utc::now().timestamp(),
+            blocked_reason: update
+                .blocked_reason
+                .map(|value| value.map(|reason| reason.as_str().to_string())),
+            blocked_origin: update.blocked_origin,
         })
     }
 }

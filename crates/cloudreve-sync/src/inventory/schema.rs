@@ -32,6 +32,8 @@ diesel::table! {
         error -> Nullable<Text>,
         created_at -> BigInt,
         updated_at -> BigInt,
+        blocked_reason -> Nullable<Text>,
+        blocked_origin -> Nullable<Text>,
     }
 }
 

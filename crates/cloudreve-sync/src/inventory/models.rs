@@ -37,6 +37,62 @@ impl ConflictState {
 /// Metadata map key storing the local file mtime (unix seconds) recorded at last sync.
 /// Used to detect local modifications that keep the same file size.
 pub const LOCAL_MTIME_KEY: &str = "local_mtime";
+pub const LOCAL_FINGERPRINT_KEY: &str = "local_fingerprint_v2";
+
+/// A snapshot that also detects same-size, same-second edits and atomic replacement.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalFingerprint {
+    pub size: u64,
+    pub modified_ns: u128,
+    #[cfg(unix)]
+    pub device: u64,
+    #[cfg(unix)]
+    pub inode: u64,
+    #[cfg(unix)]
+    pub changed_ns: i128,
+}
+
+impl LocalFingerprint {
+    /// A rename itself updates ctime on Unix. Compare the remaining fields
+    /// when checking the recovery copy immediately after that rename.
+    pub fn matches_after_rename(&self, other: &Self) -> bool {
+        self.size == other.size && self.modified_ns == other.modified_ns && {
+            #[cfg(unix)]
+            {
+                self.device == other.device && self.inode == other.inode
+            }
+            #[cfg(not(unix))]
+            {
+                true
+            }
+        }
+    }
+
+    pub fn from_metadata(meta: &std::fs::Metadata) -> Option<Self> {
+        let modified_ns = meta
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_nanos();
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        Some(Self {
+            size: meta.len(),
+            modified_ns,
+            #[cfg(unix)]
+            device: meta.dev(),
+            #[cfg(unix)]
+            inode: meta.ino(),
+            #[cfg(unix)]
+            changed_ns: i128::from(meta.ctime()) * 1_000_000_000 + i128::from(meta.ctime_nsec()),
+        })
+    }
+
+    pub fn from_path(path: &std::path::Path) -> Option<Self> {
+        Self::from_metadata(&std::fs::symlink_metadata(path).ok()?)
+    }
+}
 
 /// Read the mtime (unix seconds) of a local file, if available.
 pub fn local_mtime_secs(path: &std::path::Path) -> Option<i64> {
@@ -81,16 +137,23 @@ impl FileMetadata {
     /// additionally catches modifications that keep the same size.
     /// Returns false if the local file does not exist.
     pub fn is_locally_modified(&self, local_path: &std::path::Path) -> bool {
-        let Ok(fs_meta) = std::fs::metadata(local_path) else {
+        let Ok(fs_meta) = std::fs::symlink_metadata(local_path) else {
             return false;
         };
-        if fs_meta.len() as i64 != self.size {
+        self.is_locally_modified_with_fingerprint(
+            LocalFingerprint::from_metadata(&fs_meta).as_ref(),
+        )
+    }
+
+    pub fn is_locally_modified_with_fingerprint(&self, current: Option<&LocalFingerprint>) -> bool {
+        if current.is_none() {
             return true;
         }
-        match (self.local_mtime(), local_mtime_secs(local_path)) {
-            (Some(recorded), Some(current)) => current != recorded,
-            _ => false,
-        }
+        let recorded = self
+            .metadata
+            .get(LOCAL_FINGERPRINT_KEY)
+            .and_then(|raw| serde_json::from_str::<LocalFingerprint>(raw).ok());
+        recorded.as_ref() != current
     }
 }
 
@@ -174,6 +237,21 @@ impl MetadataEntry {
         self
     }
 
+    pub fn with_local_fingerprint(mut self, path: &std::path::Path) -> Self {
+        if let Some(fingerprint) = LocalFingerprint::from_path(path) {
+            self = self.with_fingerprint(&fingerprint);
+        }
+        self
+    }
+
+    pub fn with_fingerprint(mut self, fingerprint: &LocalFingerprint) -> Self {
+        if let Ok(value) = serde_json::to_string(fingerprint) {
+            self.metadata
+                .insert(LOCAL_FINGERPRINT_KEY.to_string(), value);
+        }
+        self
+    }
+
     pub fn with_props(mut self, props: serde_json::Value) -> Self {
         self.props = Some(props);
         self
@@ -199,6 +277,55 @@ impl From<&FileMetadata> for MetadataEntry {
     }
 }
 
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::*;
+
+    #[test]
+    fn same_second_edit_and_legacy_row_are_unverified() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        std::fs::write(&path, b"first").unwrap();
+        let recorded = LocalFingerprint::from_path(&path).unwrap();
+        let mut row = FileMetadata {
+            id: 1,
+            drive_id: Uuid::new_v4(),
+            is_folder: false,
+            local_path: path.to_string_lossy().into_owned(),
+            created_at: 0,
+            updated_at: 0,
+            etag: "version".into(),
+            metadata: HashMap::new(),
+            props: None,
+            permissions: String::new(),
+            shared: false,
+            size: 5,
+            conflict_state: None,
+        };
+        row.metadata.insert(
+            LOCAL_MTIME_KEY.into(),
+            (recorded.modified_ns / 1_000_000_000).to_string(),
+        );
+        assert!(row.is_locally_modified(&path));
+        row.metadata.insert(
+            LOCAL_FINGERPRINT_KEY.into(),
+            serde_json::to_string(&recorded).unwrap(),
+        );
+        assert!(!row.is_locally_modified(&path));
+        std::fs::write(&path, b"other").unwrap();
+        #[cfg(unix)]
+        filetime::set_file_mtime(
+            &path,
+            filetime::FileTime::from_unix_time(
+                (recorded.modified_ns / 1_000_000_000) as i64,
+                (recorded.modified_ns % 1_000_000_000) as u32,
+            ),
+        )
+        .unwrap();
+        assert!(row.is_locally_modified(&path));
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRecord {
     pub id: String,
@@ -214,6 +341,31 @@ pub struct TaskRecord {
     pub error: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    pub blocked_reason: Option<BlockedReason>,
+    pub blocked_origin: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockedReason {
+    Offline,
+    StorageConsent,
+}
+
+impl BlockedReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Offline => "offline",
+            Self::StorageConsent => "storage_consent",
+        }
+    }
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "offline" => Some(Self::Offline),
+            "storage_consent" => Some(Self::StorageConsent),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -231,6 +383,8 @@ pub struct NewTaskRecord {
     pub error: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    pub blocked_reason: Option<BlockedReason>,
+    pub blocked_origin: Option<String>,
 }
 
 impl NewTaskRecord {
@@ -255,6 +409,8 @@ impl NewTaskRecord {
             error: None,
             created_at: now,
             updated_at: now,
+            blocked_reason: None,
+            blocked_origin: None,
         }
     }
 
@@ -339,6 +495,8 @@ pub struct TaskUpdate {
     pub processed_bytes: Option<i64>,
     pub custom_state: Option<Option<serde_json::Value>>,
     pub error: Option<Option<String>>,
+    pub blocked_reason: Option<Option<BlockedReason>>,
+    pub blocked_origin: Option<Option<String>>,
 }
 
 impl TaskUpdate {
@@ -349,6 +507,8 @@ impl TaskUpdate {
             && self.processed_bytes.is_none()
             && self.custom_state.is_none()
             && self.error.is_none()
+            && self.blocked_reason.is_none()
+            && self.blocked_origin.is_none()
     }
 }
 
@@ -408,6 +568,10 @@ mod tests {
         if let Some(mtime) = local_mtime_secs(path) {
             metadata.insert(LOCAL_MTIME_KEY.to_string(), mtime.to_string());
         }
+        metadata.insert(
+            LOCAL_FINGERPRINT_KEY.to_string(),
+            serde_json::to_string(&LocalFingerprint::from_path(path).unwrap()).unwrap(),
+        );
         FileMetadata {
             id: 1,
             drive_id: Uuid::new_v4(),
@@ -471,15 +635,14 @@ mod tests {
     }
 
     #[test]
-    fn legacy_entry_without_recorded_mtime_relies_on_size_only() {
+    fn legacy_entry_without_fingerprint_is_unverified() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("file.txt");
         std::fs::write(&path, b"aaaa").unwrap();
         let mut meta = synced_metadata(&path);
         meta.metadata.clear(); // entry written before mtime tracking existed
 
-        // Same size → considered unchanged (no mtime to compare).
-        assert!(!meta.is_locally_modified(&path));
+        assert!(meta.is_locally_modified(&path));
         // Different size → still detected.
         std::fs::write(&path, b"aaaaaa").unwrap();
         assert!(meta.is_locally_modified(&path));

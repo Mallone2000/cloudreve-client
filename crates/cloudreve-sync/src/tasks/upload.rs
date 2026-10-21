@@ -92,6 +92,7 @@ pub struct UploadTask<'a> {
     cancel_token: CancellationToken,
     progress_map: Arc<DashMap<String, TaskProgress>>,
     notifier: Arc<SummaryNotifier>,
+    approved_http_storage_origins: crate::uploader::transport::StorageApprovals,
 }
 
 impl<'a> UploadTask<'a> {
@@ -104,6 +105,7 @@ impl<'a> UploadTask<'a> {
         remote_base: String,
         progress_map: Arc<DashMap<String, TaskProgress>>,
         notifier: Arc<SummaryNotifier>,
+        approved_http_storage_origins: crate::uploader::transport::StorageApprovals,
     ) -> Self {
         Self {
             inventory,
@@ -117,6 +119,7 @@ impl<'a> UploadTask<'a> {
             cancel_token: CancellationToken::new(),
             progress_map,
             notifier,
+            approved_http_storage_origins,
         }
     }
 
@@ -281,7 +284,10 @@ impl<'a> UploadTask<'a> {
             drive_id: self.drive_id.to_string(),
         };
 
-        let config = UploaderConfig::default();
+        let config = UploaderConfig {
+            approved_http_storage_origins: self.approved_http_storage_origins.clone(),
+            ..UploaderConfig::default()
+        };
         let uploader = Uploader::new(self.cr_client.clone(), self.inventory.clone(), config)
             .with_cancel_token(self.cancel_token.clone());
         let progress = InMemoryProgressReporter::new(
@@ -317,7 +323,10 @@ impl<'a> UploadTask<'a> {
                     Arc::clone(&self.progress_map),
                     Arc::clone(&self.notifier),
                 );
-                let retry_config = UploaderConfig::default();
+                let retry_config = UploaderConfig {
+                    approved_http_storage_origins: self.approved_http_storage_origins.clone(),
+                    ..UploaderConfig::default()
+                };
                 let retry_uploader =
                     Uploader::new(self.cr_client.clone(), self.inventory.clone(), retry_config)
                         .with_cancel_token(self.cancel_token.clone());
@@ -415,7 +424,8 @@ impl<'a> UploadTask<'a> {
             .with_updated_at(parse_ts(&file.updated_at))
             .with_etag(file.primary_entity.clone().unwrap_or_default())
             .with_size(file.size)
-            .with_local_mtime(local_mtime_secs(&self.task.payload.local_path));
+            .with_local_mtime(local_mtime_secs(&self.task.payload.local_path))
+            .with_local_fingerprint(&self.task.payload.local_path);
         self.inventory
             .upsert(&entry)
             .context("failed to update inventory")?;

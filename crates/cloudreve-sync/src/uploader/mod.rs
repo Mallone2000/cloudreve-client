@@ -7,8 +7,9 @@ mod chunk;
 mod encrypt;
 mod error;
 mod progress;
-mod providers;
+pub(crate) mod providers;
 mod session;
+pub mod transport;
 
 use anyhow::{Context, Result};
 pub use chunk::{ChunkProgress, ChunkUploader};
@@ -36,6 +37,7 @@ pub struct UploaderConfig {
     pub retry_max_delay: Duration,
     /// Request timeout for chunk uploads
     pub request_timeout: Duration,
+    pub approved_http_storage_origins: transport::StorageApprovals,
 }
 
 impl Default for UploaderConfig {
@@ -45,6 +47,9 @@ impl Default for UploaderConfig {
             retry_base_delay: Duration::from_secs(1),
             retry_max_delay: Duration::from_secs(30),
             request_timeout: Duration::from_secs(60),
+            approved_http_storage_origins: std::sync::Arc::new(std::sync::RwLock::new(
+                std::collections::HashSet::new(),
+            )),
         }
     }
 }
@@ -97,6 +102,7 @@ impl Uploader {
     ) -> Self {
         let http_client = HttpClient::builder()
             .connect_timeout(config.request_timeout)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("Failed to create reqwest HTTP client — this should never fail unless the system is critically out of memory or TLS configuration is broken");
 
@@ -164,6 +170,8 @@ impl Uploader {
             }
         };
 
+        transport::validate_session(&session, &self.config.approved_http_storage_origins)?;
+
         // Create chunk uploader based on policy type
         let chunk_uploader = self.create_chunk_uploader(&session)?;
 
@@ -182,6 +190,7 @@ impl Uploader {
         match result {
             Ok(()) => {
                 // Complete the upload
+                transport::validate_session(&session, &self.config.approved_http_storage_origins)?;
                 self.complete_upload(&session).await?;
                 // Clean up session from database
                 self.cleanup_session(&session).await?;
@@ -382,5 +391,41 @@ impl Uploader {
             .map_err(|e| UploadError::SessionDeletionFailed(e.to_string()))?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+    use cloudreve_api::ClientConfig;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    #[tokio::test]
+    async fn direct_upload_client_does_not_follow_redirects() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/upload"))
+            .respond_with(ResponseTemplate::new(307).insert_header(
+                "Location",
+                "https://other.example/object?signature=SIGNED_SENTINEL",
+            ))
+            .mount(&server)
+            .await;
+        let temp = tempfile::tempdir().unwrap();
+        let inventory = Arc::new(InventoryDb::with_path(temp.path().join("inventory.db")).unwrap());
+        let client = Arc::new(CrClient::new(ClientConfig::new(server.uri())));
+        let uploader = Uploader::new(client, inventory, UploaderConfig::default());
+        let response = uploader
+            .http_client
+            .put(format!("{}/upload", server.uri()))
+            .body("chunk")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 307);
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 }

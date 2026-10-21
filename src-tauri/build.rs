@@ -7,6 +7,7 @@ fn main() {
             "finish_oauth",
             "remove_drive",
             "set_insecure_http_consent",
+            "set_http_storage_origin_consent",
             "get_ignore_patterns",
             "get_default_ignore_patterns",
             "get_drive_max_file_size",
