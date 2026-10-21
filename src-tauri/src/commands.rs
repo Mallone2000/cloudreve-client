@@ -51,6 +51,14 @@ use uuid::Uuid;
 
 type CommandResult<T> = Result<T, String>;
 
+fn token_expiry(now: chrono::DateTime<Utc>, seconds: u64) -> CommandResult<String> {
+    let seconds = i64::try_from(seconds).map_err(|_| "Invalid token lifetime")?;
+    let duration = Duration::try_seconds(seconds).ok_or("Invalid token lifetime")?;
+    now.checked_add_signed(duration)
+        .map(|expiry| expiry.to_rfc3339())
+        .ok_or_else(|| "Invalid token lifetime".to_string())
+}
+
 fn is_root_drive(_path: &str) -> bool {
     // On macOS/Linux, root drive is "/"
     _path.trim() == "/"
@@ -110,9 +118,8 @@ pub(crate) async fn add_drive_with_tokens(
     }
 
     let now = Utc::now();
-    let access_expires = (now + Duration::seconds(config.access_token_expires as i64)).to_rfc3339();
-    let refresh_expires =
-        (now + Duration::seconds(config.refresh_token_expires as i64)).to_rfc3339();
+    let access_expires = token_expiry(now, config.access_token_expires)?;
+    let refresh_expires = token_expiry(now, config.refresh_token_expires)?;
 
     let credentials = Credentials {
         access_token: Some(config.access_token),
@@ -791,6 +798,14 @@ pub async fn get_user_profile(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rejects_unrepresentable_token_lifetimes() {
+        let now = chrono::Utc::now();
+        assert!(super::token_expiry(now, 3600).is_ok());
+        assert!(super::token_expiry(now, u64::MAX).is_err());
+        assert!(super::token_expiry(now, i64::MAX as u64).is_err());
+    }
+
     /// The Settings dialog displays whatever this command returns, and nothing
     /// else describes the built-in rules. Wiring it to the drive's own list, or
     /// to an empty vector, would put the defaults back out of sight — a file

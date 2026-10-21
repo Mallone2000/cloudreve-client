@@ -54,9 +54,18 @@ pub fn write_private<P: AsRef<Path>, C: AsRef<[u8]>>(path: P, contents: C) -> Re
 pub fn restrict_file<P: AsRef<Path>>(path: P) -> Result<()> {
     #[cfg(unix)]
     {
+        use std::os::unix::fs::OpenOptionsExt;
         use std::os::unix::fs::PermissionsExt;
         let path = path.as_ref();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)
+            .with_context(|| format!("Failed to open private file {}", path.display()))?;
+        if !file.metadata()?.is_file() {
+            anyhow::bail!("Private file must be a regular file: {}", path.display());
+        }
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("Failed to set permissions on {}", path.display()))?;
     }
     #[cfg(not(unix))]
@@ -109,6 +118,21 @@ mod tests {
                 .unwrap()
                 .file_type()
                 .is_symlink()
+        );
+    }
+
+    #[test]
+    fn restrict_file_rejects_symlink_without_changing_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        let link = dir.path().join("drives.json");
+        std::fs::write(&target, b"secret").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(restrict_file(&link).is_err());
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o644
         );
     }
 }

@@ -62,8 +62,11 @@ pub(super) fn cached_icon_is_safe(path: &str) -> bool {
     let Ok(cache_dir) = get_icons_dir() else {
         return false;
     };
-    let path = std::path::Path::new(path);
-    path.parent() == Some(cache_dir.as_path())
+    icon_path_is_safe(std::path::Path::new(path), &cache_dir)
+}
+
+fn icon_path_is_safe(path: &std::path::Path, cache_dir: &std::path::Path) -> bool {
+    path.parent() == Some(cache_dir)
         && std::fs::symlink_metadata(path)
             .is_ok_and(|meta| meta.is_file() && !meta.file_type().is_symlink())
 }
@@ -264,6 +267,22 @@ mod file_safety_tests {
                 .file_type()
                 .is_symlink()
         );
+    }
+
+    #[test]
+    fn only_regular_files_directly_inside_icon_cache_can_be_removed() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("icos");
+        std::fs::create_dir(&cache).unwrap();
+        let inside = cache.join("icon.png");
+        let outside = temp.path().join("outside.txt");
+        let link = cache.join("link.png");
+        std::fs::write(&inside, b"icon").unwrap();
+        std::fs::write(&outside, b"keep").unwrap();
+        symlink(&outside, &link).unwrap();
+        assert!(icon_path_is_safe(&inside, &cache));
+        assert!(!icon_path_is_safe(&outside, &cache));
+        assert!(!icon_path_is_safe(&link, &cache));
     }
 }
 

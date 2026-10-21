@@ -102,6 +102,14 @@ impl ConfigManager {
     /// This should be called once at application startup.
     pub fn init() -> Result<&'static ConfigManager> {
         let config_path = Self::get_config_path()?;
+        let parent = config_path.parent().context("Config path has no parent")?;
+        fs::create_dir_all(parent).context("Failed to create config directory")?;
+        let metadata =
+            fs::symlink_metadata(parent).context("Failed to inspect config directory")?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            anyhow::bail!("Config directory must be a real directory");
+        }
+        crate::utils::secure_fs::restrict_dir(parent)?;
         let config = Self::load_from_path(&config_path)?;
 
         let manager = ConfigManager {
@@ -139,6 +147,7 @@ impl ConfigManager {
             return Ok(AppConfig::default());
         }
 
+        crate::utils::secure_fs::restrict_file(path)?;
         let content = fs::read_to_string(path).context("Failed to read config file")?;
 
         // serde's #[serde(default)] handles missing fields automatically
@@ -414,5 +423,20 @@ mod tests {
         let path = PathBuf::from("/nonexistent/path/config.json");
         let config = ConfigManager::load_from_path(&path).unwrap();
         assert!(config.auto_start); // Should use default (true)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_tightens_existing_config_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::write(&path, "{}").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        ConfigManager::load_from_path(&path).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }

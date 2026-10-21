@@ -222,6 +222,7 @@ impl DriveManager {
 
         tracing::debug!(target: "drive", path = %config_file.display(), "Loading drive configurations");
 
+        crate::utils::secure_fs::restrict_file(&config_file)?;
         let content =
             fs::read_to_string(&config_file).context("Failed to read drive config file")?;
 
@@ -592,9 +593,17 @@ impl DriveManager {
         allow_insecure_http: bool,
     ) -> Result<()> {
         let parsed = url::Url::parse(&instance_url).context("Invalid instance URL")?;
+        if !matches!(parsed.scheme(), "http" | "https")
+            || parsed.host_str().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+        {
+            anyhow::bail!("Reauthorization requires an HTTP(S) site without embedded credentials");
+        }
         if parsed.scheme() == "http" && !allow_insecure_http {
             anyhow::bail!("HTTP consent required");
         }
+        let instance_url = parsed.origin().ascii_serialization();
         if let Some(mut config) = self.pending_http.write().await.remove(id) {
             if config.user_id != user_id {
                 self.pending_http
@@ -637,14 +646,14 @@ impl DriveManager {
 
         // Clear old icon files if they exist
         if let Some(ref ico_path) = config.icon_path {
-            if std::path::Path::new(ico_path).exists() {
+            if favicon::cached_icon_is_safe(ico_path) {
                 if let Err(e) = std::fs::remove_file(ico_path) {
                     tracing::warn!(target: "drive::manager", drive_id = %id, error = %e, "Failed to remove old ICO file");
                 }
             }
         }
         if let Some(ref raw_path) = config.raw_icon_path {
-            if std::path::Path::new(raw_path).exists() {
+            if favicon::cached_icon_is_safe(raw_path) {
                 if let Err(e) = std::fs::remove_file(raw_path) {
                     tracing::warn!(target: "drive::manager", drive_id = %id, error = %e, "Failed to remove old raw icon file");
                 }
