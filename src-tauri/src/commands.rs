@@ -515,6 +515,7 @@ fn show_drive_window_internal(app: &AppHandle, title: &str, url_path: &str) {
         state: None,
         radius: None,
         color: None,
+        interactive: false,
     };
 
     let builder = WebviewWindowBuilder::new(app, "add-drive", WebviewUrl::App(url_path.into()))
