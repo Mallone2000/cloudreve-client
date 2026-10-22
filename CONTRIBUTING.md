@@ -180,10 +180,13 @@ but it also means **shipping only prereleases leaves existing users stranded on
 the last stable one**.
 
 > [!WARNING]
-> macOS builds are not signed or notarized yet. Gatekeeper blocks the first launch
-> (right-click → Open), and the updater cannot install an unsigned build, so macOS
-> users must update by hand until a signing identity is set up. On Linux only the
-> AppImage can update itself; the `.deb` is manual.
+> Release publishing requires a Developer ID Application certificate and Apple
+> notarization credentials. Add `APPLE_CERTIFICATE` (base64 encoded `.p12`),
+> `APPLE_CERTIFICATE_PASSWORD`, `APPLE_ID`, an app-specific `APPLE_PASSWORD`, and
+> `APPLE_TEAM_ID` as GitHub Actions secrets. The workflow also requires
+> `TAURI_SIGNING_PRIVATE_KEY` for updater signatures. It fails before creating
+> a draft when these are missing. On Linux only the AppImage can update itself;
+> the `.deb` is manual.
 
 
 ## Reporting bugs

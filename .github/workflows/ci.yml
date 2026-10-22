@@ -8,18 +8,76 @@ on:
       - 'src-tauri/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'vendor/glib-0.18.5/**'
       - 'ui/**'
       - '.github/workflows/ci.yml'
+      - '.github/workflows/release.yml'
   pull_request:
     paths:
       - 'crates/**'
       - 'src-tauri/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'vendor/glib-0.18.5/**'
       - 'ui/**'
       - '.github/workflows/ci.yml'
+      - '.github/workflows/release.yml'
 
 jobs:
+  security:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Audit workspace dependencies
+        run: |
+          set -euo pipefail
+          report="$(mktemp)"
+          trap 'rm -f "$report"' EXIT
+          cargo audit --file Cargo.lock --format json > "$report"
+          python3 - "$report" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1]) as file:
+              report = json.load(file)
+          known = {
+              "RUSTSEC-2024-0370",  # proc-macro-error: GTK build macro
+              "RUSTSEC-2026-0370",  # zvariant: Tauri Linux D-Bus plugins
+              "RUSTSEC-2026-0371",  # zbus_names: same dependency chain
+              "RUSTSEC-2026-0372",  # zvariant_derive: same dependency chain
+          }
+          warnings = [entry for group in report["warnings"].values() for entry in group]
+          unexpected = [
+              entry["advisory"]["id"]
+              for entry in warnings
+              if entry["advisory"]["id"] not in known
+              or entry["advisory"].get("informational") != "unmaintained"
+          ]
+          if report["vulnerabilities"]["count"] or unexpected:
+              raise SystemExit(f"New security advisories: {unexpected}")
+          print(f"No known vulnerabilities; {len(warnings)} tracked maintenance warnings")
+          PY
+      - name: Audit patched GLib version for new advisories
+        run: |
+          set -euo pipefail
+          grep -q '^version = "0.18.5"$' vendor/glib-0.18.5/Cargo.toml
+          cargo pkgid -p glib | grep -F '/vendor/glib-0.18.5#glib@0.18.5'
+          lockfile="$(mktemp)"
+          trap 'rm -f "$lockfile"' EXIT
+          cat > "$lockfile" <<'EOF'
+          version = 3
+
+          [[package]]
+          name = "glib"
+          version = "0.18.5"
+          source = "registry+https://github.com/rust-lang/crates.io-index"
+          EOF
+          cargo audit --file "$lockfile" --ignore RUSTSEC-2024-0429 --deny warnings
+
   frontend:
     name: Frontend lint and build
     runs-on: ubuntu-latest
@@ -72,6 +130,9 @@ jobs:
 
       - name: Run tests
         run: cargo test --locked -p cloudreve-sync -p cloudreve-api
+
+      - name: Test patched GLib string iterator
+        run: cargo test --release --manifest-path vendor/glib-0.18.5/Cargo.toml --lib variant_iter::tests
 
       - name: Benchmark 1,000-file recovery
         run: cargo test --locked -p cloudreve-sync --test reconciliation_benchmark recovery_1000_files -- --ignored --exact --nocapture

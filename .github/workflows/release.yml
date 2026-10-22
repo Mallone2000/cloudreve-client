@@ -22,6 +22,22 @@ jobs:
       release_id: ${{ steps.create.outputs.id }}
       tag: ${{ steps.meta.outputs.tag }}
     steps:
+      - name: Require release signing credentials
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          for name in TAURI_SIGNING_PRIVATE_KEY APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [[ -z "${!name}" ]]; then
+              echo "Missing required release secret: $name" >&2
+              exit 1
+            fi
+          done
+
       - name: Checkout
         uses: actions/checkout@v6.0.2
         with:
@@ -67,9 +83,8 @@ jobs:
 
           ---
 
-          ### Installation (macOS, Apple Silicon)
-          1. Download the `.dmg` and drag Cloudreve to Applications
-          2. **First launch**: right-click -> Open -> Run `xattr -cr /Applications/Cloudreve.app`
+          ### Installation (macOS)
+          Download the signed and notarized `.dmg` for your Mac, then drag Cloudreve to Applications.
 
           ### Installation (Linux, x86_64)
           - `.AppImage`: `chmod +x Cloudreve*.AppImage && ./Cloudreve*.AppImage`
@@ -106,7 +121,7 @@ jobs:
             args: "--target aarch64-apple-darwin"
           - platform: macos-15-intel
             args: "--target x86_64-apple-darwin"
-            target: aarch64-apple-darwin
+            target: x86_64-apple-darwin
           - platform: ubuntu-22.04   # Linux x86_64
             args: ''
             target: ''
@@ -168,7 +183,43 @@ jobs:
         working-directory: ui
         run: yarn install --frozen-lockfile
 
-      - name: Build Tauri app
+      - name: Build signed and notarized macOS app
+        if: startsWith(matrix.platform, 'macos-')
+        uses: tauri-apps/tauri-action@v0.6.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          includeUpdaterJson: true
+          args: ${{ matrix.args }}
+
+      - name: Verify macOS signature and notarization
+        if: startsWith(matrix.platform, 'macos-')
+        run: |
+          set -euo pipefail
+          app_dir="src-tauri/target/${{ matrix.target }}/release/bundle/macos"
+          dmg_dir="src-tauri/target/${{ matrix.target }}/release/bundle/dmg"
+          apps=("$app_dir"/*.app)
+          dmgs=("$dmg_dir"/*.dmg)
+          [[ -e "${apps[0]}" && -e "${dmgs[0]}" ]]
+          for app in "${apps[@]}"; do
+            codesign --verify --deep --strict --verbose=2 "$app"
+            signature="$(codesign -dv --verbose=4 "$app" 2>&1)"
+            [[ "$signature" == *"Authority=Developer ID Application:"* ]]
+          done
+          for dmg in "${dmgs[@]}"; do
+            xcrun stapler validate "$dmg"
+          done
+
+      - name: Build Linux app
+        if: matrix.platform == 'ubuntu-22.04'
         uses: tauri-apps/tauri-action@v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

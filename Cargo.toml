@@ -5,6 +5,12 @@ members = [
     "crates/cloudreve-sync",
     "src-tauri",
 ]
+exclude = ["vendor/glib-0.18.5"]
+
+# GTK 3 in Tauri 2 requires glib 0.18. Backport the upstream fix for
+# RUSTSEC-2024-0429 until the Linux runtime can use glib >= 0.20.
+[patch.crates-io]
+glib = { path = "vendor/glib-0.18.5" }
 
 # Single source of truth for the Rust side. `CARGO_PKG_VERSION` is baked into the
 # User-Agent sent to every Cloudreve server (crates/cloudreve-sync/src/lib.rs), so
