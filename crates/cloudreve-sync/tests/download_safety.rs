@@ -1,6 +1,6 @@
 mod common;
 
-use cloudreve_sync::inventory::{BlockedReason, ConflictState, NewTaskRecord, TaskStatus};
+use cloudreve_sync::inventory::{ConflictState, NewTaskRecord, TaskStatus};
 use cloudreve_sync::tasks::TaskPayload;
 use common::{TestEnv, remote_file};
 use serde_json::json;
@@ -136,50 +136,9 @@ async fn reducing_limit_cancels_running_download_before_install() {
 }
 
 #[tokio::test]
-async fn storage_consent_pending_and_revocation_survive_restart() {
+async fn legacy_http_storage_approval_cannot_enable_a_download() {
     let mut env = TestEnv::new().await;
-    let origin = env.server.uri();
-    env.mount
-        .config
-        .write()
-        .await
-        .approved_http_storage_origins
-        .clear();
-    env.mount
-        .task_queue
-        .approved_http_storage_origins
-        .write()
-        .unwrap()
-        .clear();
-    env.set_remote_files(vec![remote_file("file", 4, "remote-new")])
-        .await;
-    configure_download(
-        &env,
-        "file",
-        4,
-        b"data".to_vec(),
-        Duration::from_millis(500),
-    )
-    .await;
-    env.full_sync().await.unwrap();
-    for _ in 0..100 {
-        if env
-            .tasks_of_type("download")
-            .iter()
-            .any(|task| task.blocked_reason == Some(BlockedReason::StorageConsent))
-        {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let blocked = env.tasks_of_type("download");
-    assert_eq!(blocked[0].blocked_origin.as_deref(), Some(origin.as_str()));
-    env.restart_mount().await;
-    assert_eq!(
-        env.tasks_of_type("download")[0].blocked_reason,
-        Some(BlockedReason::StorageConsent)
-    );
-
+    let origin = "http://storage.example".to_string();
     env.mount
         .config
         .write()
@@ -188,29 +147,30 @@ async fn storage_consent_pending_and_revocation_survive_restart() {
         .push(origin.clone());
     env.mount
         .task_queue
-        .approve_storage_origin(&origin)
-        .unwrap();
-    wait_for_blob_request(&env).await;
-    env.mount
-        .config
-        .write()
-        .await
         .approved_http_storage_origins
-        .clear();
-    env.mount
-        .task_queue
-        .revoke_storage_origin(&origin)
-        .await
-        .unwrap();
-    assert_eq!(
-        wait_for_terminal_download(&env).await,
-        TaskStatus::Cancelled
-    );
+        .write()
+        .unwrap()
+        .insert(origin.clone());
+    env.set_remote_files(vec![remote_file("file", 4, "remote-new")])
+        .await;
+    let remote = remote_file("file", 4, "remote-new");
+    Mock::given(method("GET"))
+        .and(path("/api/v4/file/info"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"code":0,"msg":"","data":remote})),
+        )
+        .mount(&env.server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v4/file/url"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"code":0,"msg":"","data":{"urls":[{"url":"http://storage.example/blob/file"}],"expires":"2099-01-01T00:00:00Z"}})))
+        .mount(&env.server)
+        .await;
+    env.full_sync().await.unwrap();
+    assert_eq!(wait_for_terminal_download(&env).await, TaskStatus::Failed);
+    assert!(!env.local_path("file").exists());
     env.restart_mount().await;
-    assert_eq!(
-        env.tasks_of_type("download")[0].status,
-        TaskStatus::Cancelled
-    );
+    assert_eq!(env.tasks_of_type("download")[0].status, TaskStatus::Failed);
     assert!(!env.local_path("file").exists());
 }
 

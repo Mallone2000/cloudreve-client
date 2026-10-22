@@ -41,26 +41,15 @@ pub fn canonical_http_origin(raw: &str) -> Result<String> {
     Ok(url.origin().ascii_serialization())
 }
 
-pub fn validate_provider_url(raw: &str, approvals: &StorageApprovals) -> Result<()> {
+pub fn validate_provider_url(raw: &str, _approvals: &StorageApprovals) -> Result<()> {
     let url = Url::parse(raw).context("Invalid provider URL")?;
     if url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() {
         anyhow::bail!("Provider URL has no host or contains credentials");
     }
-    match url.scheme() {
-        "https" => Ok(()),
-        "http" => {
-            let origin = url.origin().ascii_serialization();
-            if approvals
-                .read()
-                .map_err(|_| anyhow::anyhow!("Storage approvals unavailable"))?
-                .contains(&origin)
-            {
-                Ok(())
-            } else {
-                Err(StorageConsentRequired { origin }.into())
-            }
-        }
-        _ => anyhow::bail!("Provider URL must use HTTPS or an approved HTTP origin"),
+    if url.scheme() == "https" {
+        Ok(())
+    } else {
+        anyhow::bail!("Provider URL must use HTTPS")
     }
 }
 
@@ -104,7 +93,7 @@ mod tests {
                 "http://storage.example:8080/object?signature=secret",
                 &approvals
             )
-            .is_ok()
+            .is_err()
         );
         assert!(validate_provider_url("http://storage.example:8081/object", &approvals).is_err());
         assert!(

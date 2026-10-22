@@ -100,9 +100,15 @@ impl Uploader {
         inventory: Arc<InventoryDb>,
         config: UploaderConfig,
     ) -> Self {
-        let http_client = HttpClient::builder()
+        let mut http_client_builder = HttpClient::builder()
             .connect_timeout(config.request_timeout)
-            .redirect(reqwest::redirect::Policy::none())
+            .redirect(reqwest::redirect::Policy::none());
+        if let Some(pem) = cr_client.tls_root_certificate_pem() {
+            http_client_builder = http_client_builder.add_root_certificate(
+                reqwest::Certificate::from_pem(pem).expect("Invalid TLS root certificate"),
+            );
+        }
+        let http_client = http_client_builder
             .build()
             .expect("Failed to create reqwest HTTP client — this should never fail unless the system is critically out of memory or TLS configuration is broken");
 

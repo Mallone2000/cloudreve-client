@@ -546,7 +546,8 @@ impl ExplorerApi for Client {
             .header("Content-Type", "application/octet-stream")
             .body(data)
             .send()
-            .await?;
+            .await
+            .map_err(reqwest::Error::without_url)?;
 
         let api_response: crate::error::ApiResponse<FileResponse> =
             crate::client::capped_response_json(response).await?;
@@ -617,7 +618,8 @@ impl ExplorerApi for Client {
             .header("Content-Type", "application/octet-stream")
             .body(data)
             .send()
-            .await?;
+            .await
+            .map_err(reqwest::Error::without_url)?;
 
         let api_response: crate::error::ApiResponse<UploadCredential> =
             crate::client::capped_response_json(response).await?;
@@ -647,7 +649,8 @@ impl ExplorerApi for Client {
             .header("Content-Length", content_length)
             .body(body)
             .send()
-            .await?;
+            .await
+            .map_err(reqwest::Error::without_url)?;
 
         let api_response: crate::error::ApiResponse<()> =
             crate::client::capped_response_json(response).await?;
@@ -716,7 +719,12 @@ impl FileEventSubscription {
             }
 
             // Need more data from the stream
-            match self.response.chunk().await {
+            match self
+                .response
+                .chunk()
+                .await
+                .map_err(reqwest::Error::without_url)
+            {
                 Ok(Some(chunk)) => {
                     let text = String::from_utf8_lossy(&chunk);
                     self.buffer.push_str(&text);
@@ -868,7 +876,8 @@ impl FileEventsApi for Client {
             .header("Authorization", format!("Bearer {}", token))
             .header("Accept", "text/event-stream")
             .send()
-            .await?;
+            .await
+            .map_err(reqwest::Error::without_url)?;
 
         // Check if we got an SSE response by looking at content-type
         let content_type = response

@@ -40,10 +40,9 @@ impl From<&DriveConfig> for DriveSummary {
             user_id: config.user_id.clone(),
             ignore_patterns: config.ignore_patterns.clone(),
             max_file_size_mb: config.max_file_size_mb,
-            allow_insecure_http: config.allow_insecure_http,
+            allow_insecure_http: false,
             transport_consent_required: url::Url::parse(&config.instance_url)
-                .is_ok_and(|url| url.scheme() == "http")
-                && !config.allow_insecure_http,
+                .is_ok_and(|url| url.scheme() == "http"),
         }
     }
 }
@@ -109,6 +108,18 @@ mod summary_tests {
             .unwrap()
             .remove("allow_insecure_http");
         let config: DriveConfig = serde_json::from_value(serialized).unwrap();
+        let summary = DriveSummary::from(&config);
+        assert!(!summary.allow_insecure_http);
+        assert!(summary.transport_consent_required);
+    }
+
+    #[test]
+    fn previously_approved_http_config_is_still_dormant() {
+        let config = DriveConfig {
+            instance_url: "http://cloud.example".into(),
+            allow_insecure_http: true,
+            ..Default::default()
+        };
         let summary = DriveSummary::from(&config);
         assert!(!summary.allow_insecure_http);
         assert!(summary.transport_consent_required);

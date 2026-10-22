@@ -118,7 +118,7 @@ impl TaskQueue {
             RwLock::new(approved_http_storage_origins.into_iter().collect()),
         );
         let redirect_approvals = approved_http_storage_origins.clone();
-        let download_client = reqwest::Client::builder()
+        let mut download_client_builder = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
             .read_timeout(std::time::Duration::from_secs(60))
             .redirect(reqwest::redirect::Policy::custom(move |attempt| {
@@ -136,7 +136,13 @@ impl TaskQueue {
                 } else {
                     attempt.stop()
                 }
-            }))
+            }));
+        if let Some(pem) = cr_client.tls_root_certificate_pem() {
+            download_client_builder = download_client_builder.add_root_certificate(
+                reqwest::Certificate::from_pem(pem).expect("Invalid TLS root certificate"),
+            );
+        }
+        let download_client = download_client_builder
             .build()
             .expect("Failed to create download HTTP client");
         let queue = Arc::new(Self {

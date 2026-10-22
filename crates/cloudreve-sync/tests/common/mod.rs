@@ -9,8 +9,9 @@
 //! uses part of the harness, so dead_code warnings are suppressed.
 #![allow(dead_code)]
 
+use std::ops::Deref;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use cloudreve_sync::drive::commands::ManagerCommand;
 use cloudreve_sync::drive::mounts::{Credentials, DriveConfig, Mount};
@@ -22,6 +23,148 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+struct TestTlsIdentity {
+    cert_pem: Vec<u8>,
+    cert_der: Vec<u8>,
+    key_der: Vec<u8>,
+}
+
+fn test_tls_identity() -> &'static TestTlsIdentity {
+    static IDENTITY: OnceLock<TestTlsIdentity> = OnceLock::new();
+    IDENTITY.get_or_init(|| {
+        use std::process::Command;
+
+        let temp = tempfile::tempdir().expect("test certificate directory");
+        let cert_pem = temp.path().join("localhost.cert.pem");
+        let cert_der = temp.path().join("localhost.cert.der");
+        let key_pem = temp.path().join("localhost.key.pem");
+        let key_der = temp.path().join("localhost.key.der");
+        let status = Command::new("openssl")
+            .args([
+                "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+            ])
+            .arg("-keyout")
+            .arg(&key_pem)
+            .arg("-out")
+            .arg(&cert_pem)
+            .args([
+                "-subj",
+                "/CN=localhost",
+                "-addext",
+                "subjectAltName=DNS:localhost,IP:127.0.0.1",
+                "-addext",
+                "basicConstraints=critical,CA:TRUE",
+                "-addext",
+                "extendedKeyUsage=serverAuth",
+                "-addext",
+                "keyUsage=critical,digitalSignature,keyEncipherment,keyCertSign",
+            ])
+            .output()
+            .expect("run openssl for test certificate");
+        assert!(
+            status.status.success(),
+            "test certificate generation failed: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        let status = Command::new("openssl")
+            .args(["x509", "-in"])
+            .arg(&cert_pem)
+            .args(["-outform", "DER", "-out"])
+            .arg(&cert_der)
+            .output()
+            .expect("convert test certificate");
+        assert!(
+            status.status.success(),
+            "test certificate conversion failed"
+        );
+        let status = Command::new("openssl")
+            .args(["pkcs8", "-topk8", "-nocrypt", "-in"])
+            .arg(&key_pem)
+            .args(["-outform", "DER", "-out"])
+            .arg(&key_der)
+            .output()
+            .expect("convert test private key");
+        assert!(
+            status.status.success(),
+            "test private key conversion failed"
+        );
+        TestTlsIdentity {
+            cert_pem: std::fs::read(cert_pem).unwrap(),
+            cert_der: std::fs::read(cert_der).unwrap(),
+            key_der: std::fs::read(key_der).unwrap(),
+        }
+    })
+}
+
+/// Serve wiremock through a local TLS endpoint. Transfer tests therefore use
+/// the same HTTPS requirement as the shipped client.
+pub struct TlsMockServer {
+    mock: MockServer,
+    uri: String,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl TlsMockServer {
+    pub async fn start() -> Self {
+        use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+
+        let mock = MockServer::start().await;
+        let upstream = *mock.address();
+        let identity = test_tls_identity();
+        let certificate = CertificateDer::from(identity.cert_der.clone());
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(identity.key_der.clone()));
+        let tls = tokio_rustls::rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate], key)
+            .expect("test TLS certificate");
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test TLS listener");
+        let uri = format!(
+            "https://localhost:{}",
+            listener.local_addr().unwrap().port()
+        );
+        let task = tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    if let Ok(mut tls_stream) = acceptor.accept(socket).await {
+                        if let Ok(mut upstream_stream) =
+                            tokio::net::TcpStream::connect(upstream).await
+                        {
+                            let _ = tokio::io::copy_bidirectional(
+                                &mut tls_stream,
+                                &mut upstream_stream,
+                            )
+                            .await;
+                        }
+                    }
+                });
+            }
+        });
+        Self { mock, uri, task }
+    }
+
+    pub fn uri(&self) -> String {
+        self.uri.clone()
+    }
+}
+
+impl Deref for TlsMockServer {
+    type Target = MockServer;
+
+    fn deref(&self) -> &Self::Target {
+        &self.mock
+    }
+}
+
+impl Drop for TlsMockServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
 
 pub const REMOTE_BASE: &str = "cloudreve://my/sync";
 
@@ -86,7 +229,7 @@ impl Drop for RamDisk {
 }
 
 pub struct TestEnv {
-    pub server: MockServer,
+    pub server: TlsMockServer,
     pub mount: Arc<Mount>,
     pub inventory: Arc<InventoryDb>,
     pub sync_dir: PathBuf,
@@ -129,7 +272,7 @@ impl TestEnv {
             InventoryDb::with_path(tmp.path().join("meta.db")).expect("create inventory db"),
         );
 
-        let server = MockServer::start().await;
+        let server = TlsMockServer::start().await;
         let drive_id = Uuid::new_v4().to_string();
 
         let config = DriveConfig {
@@ -145,8 +288,9 @@ impl TestEnv {
             },
             sync_path: sync_dir.clone(),
             enabled: true,
-            allow_insecure_http: true,
-            approved_http_storage_origins: vec![server.uri()],
+            allow_insecure_http: false,
+            approved_http_storage_origins: Vec::new(),
+            tls_root_certificate_pem: Some(test_tls_identity().cert_pem.clone()),
             user_id: "test-user".to_string(),
             ignore_patterns,
             max_file_size_mb,

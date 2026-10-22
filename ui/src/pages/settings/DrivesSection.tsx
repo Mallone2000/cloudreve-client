@@ -44,8 +44,6 @@ interface DriveInfoResponse {
   remote_path: string;
   enabled: boolean;
   user_id: string;
-  approved_http_storage_origins?: string[];
-  pending_http_storage_origins?: string[];
   status: string;
   capacity?: {
     total: number;
@@ -142,15 +140,6 @@ export default function DrivesSection() {
     }
   };
 
-  const handleStorageConsent = async (driveId: string, origin: string, allow: boolean) => {
-    try {
-      await invoke("set_http_storage_origin_consent", { driveId, origin, allow });
-      await fetchDrives();
-    } catch (error) {
-      console.error("Failed to update storage origin consent:", error);
-    }
-  };
-
   const handleEditIgnorePatterns = async (driveId: string) => {
     try {
       const [patterns, maxMb] = await Promise.all([
@@ -237,7 +226,7 @@ export default function DrivesSection() {
       case "credential_expired":
         return t("settings.driveStatus.credentialExpired");
       case "transport_consent_required":
-        return "HTTP consent required";
+        return "HTTPS required";
       default:
         return status;
     }
@@ -426,24 +415,11 @@ export default function DrivesSection() {
                   </Box>
                 </Box>
 
-                {(drive.pending_http_storage_origins?.length || drive.approved_http_storage_origins?.length) ? (
-                  <Stack spacing={1} sx={{ mt: 2 }}>
-                    {[...new Set([
-                      ...(drive.pending_http_storage_origins ?? []),
-                      ...(drive.approved_http_storage_origins ?? []),
-                    ])].map((origin) => {
-                      const approved = drive.approved_http_storage_origins?.includes(origin) ?? false;
-                      return <Box key={origin} sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                        <Typography variant="body2" sx={{ flex: 1, overflowWrap: "anywhere" }}>
-                          HTTP storage: {origin}
-                        </Typography>
-                        <Button size="small" onClick={() => handleStorageConsent(drive.id, origin, !approved)}>
-                          {approved ? "Revoke" : "Approve"}
-                        </Button>
-                      </Box>;
-                    })}
-                  </Stack>
-                ) : null}
+                {drive.status === "transport_consent_required" && (
+                  <Alert severity="warning" sx={{ mt: 2 }}>
+                    This saved drive uses HTTP and is paused. Remove it, then add the site's HTTPS address.
+                  </Alert>
+                )}
 
                 {/* Action Footer */}
                 <Divider sx={{ my: 2, mx: -2 }} />
@@ -461,42 +437,6 @@ export default function DrivesSection() {
                       onClick={() => handleReauthorize(drive)}
                     >
                       {t("settings.reauthorize")}
-                    </SecondaryButton>
-                  )}
-
-                  {drive.status === "transport_consent_required" && (
-                    <SecondaryButton
-                      size="small"
-                      onClick={async () => {
-                        const accepted = await ask(
-                          "This Cloudreve site uses HTTP. Your credentials and files can be read or changed on the network. Allow this drive to connect?",
-                          { title: "Allow insecure HTTP", kind: "warning" },
-                        );
-                        if (accepted) {
-                          await invoke("set_insecure_http_consent", { driveId: drive.id, allow: true });
-                          await fetchDrives();
-                        }
-                      }}
-                    >
-                      Allow HTTP
-                    </SecondaryButton>
-                  )}
-
-                  {drive.instance_url.toLowerCase().startsWith("http://") && drive.status !== "transport_consent_required" && (
-                    <SecondaryButton
-                      size="small"
-                      onClick={async () => {
-                        const confirmed = await ask(
-                          "Pause this HTTP drive and revoke its network consent? Pending transfers will stop.",
-                          { title: "Revoke HTTP consent", kind: "warning" },
-                        );
-                        if (confirmed) {
-                          await invoke("set_insecure_http_consent", { driveId: drive.id, allow: false });
-                          await fetchDrives();
-                        }
-                      }}
-                    >
-                      Revoke HTTP
                     </SecondaryButton>
                   )}
 

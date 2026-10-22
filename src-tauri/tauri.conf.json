@@ -30,7 +30,9 @@
         "font-src": "'self' data:",
         "style-src": "'self' 'unsafe-inline'",
         "object-src": "'none'",
-        "base-uri": "'self'"
+        "base-uri": "'self'",
+        "frame-src": "'none'",
+        "form-action": "'none'"
       },
       "assetProtocol": {
         "enable": true,
@@ -46,7 +48,7 @@
   },
   "bundle": {
     "active": true,
-    "createUpdaterArtifacts": true,
+    "createUpdaterArtifacts": false,
     "targets": "all",
     "icon": [
       "icons/32x32.png",
@@ -65,16 +67,8 @@
   "plugins": {
     "deep-link": {
       "desktop": {
-        "schemes": [
-          "cloudreve"
-        ]
+        "schemes": ["cloudreve"]
       }
-    },
-    "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVFOTRGRjJFNEU3QTNBMDEKUldRQk9ucE9MditVWHFTaUl4S3B6eEZYdDJETlVPNzVxUUk5Rm1JK1BHRHNiMG11WGw1ZnlkRVIK",
-      "endpoints": [
-        "https://github.com/cedev-1/cloudreve-client/releases/latest/download/latest.json"
-      ]
     }
   }
 }

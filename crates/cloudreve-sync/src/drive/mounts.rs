@@ -32,12 +32,14 @@ pub struct DriveConfig {
     pub enabled: bool,
     pub user_id: String,
 
-    /// Consent to send credentials and file data to this drive over plain HTTP.
-    /// Old configurations default to false and remain dormant until accepted.
+    /// Retained only to deserialize older drive records; HTTP is always blocked.
     #[serde(default)]
     pub allow_insecure_http: bool,
     #[serde(default)]
     pub approved_http_storage_origins: Vec<String>,
+    /// Runtime-only trust anchor for the local HTTPS integration test server.
+    #[serde(skip)]
+    pub tls_root_certificate_pem: Option<Vec<u8>>,
 
     /// List of gitignore-style patterns for files/directories to ignore during sync
     #[serde(default)]
@@ -174,9 +176,12 @@ impl Mount {
     ) -> Self {
         let (command_tx, command_rx) = mpsc::unbounded_channel();
 
-        let client_config = ClientConfig::new(config.instance_url.clone())
+        let mut client_config = ClientConfig::new(config.instance_url.clone())
             .with_client_id(config.sse_client_id.clone())
             .with_user_agent(crate::USER_AGENT);
+        if let Some(pem) = &config.tls_root_certificate_pem {
+            client_config = client_config.with_tls_root_certificate(pem.clone());
+        }
         let mut cr_client = Client::new(client_config);
         cr_client
             .load_tokens(&Token {

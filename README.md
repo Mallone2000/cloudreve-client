@@ -10,9 +10,11 @@ Desktop sync client for [Cloudreve](https://cloudreve.org) - fork from [cloudrev
 
 ## Transport and OAuth security
 
-The client uses HTTPS by default. Existing HTTP drives remain paused until you allow HTTP in Settings; new HTTP sites require the same choice before site validation. Revoking consent pauses that drive. HTTP exposes credentials and file contents to anyone able to observe or alter the connection.
+The client requires HTTPS for Cloudreve sites and storage transfers. Saved HTTP drives stay visible but paused and make no network requests. Remove an HTTP drive and add the site's HTTPS address to resume syncing. The app is updated with a local macOS build; it does not download upstream application updates.
 
 OAuth runs in the Rust backend with PKCE. The shared OAuth registration is retained for compatibility because [Cloudreve currently requires `client_secret` during token exchange](https://docs.cloudreve.org/en/api/auth). The bundled secret is extractable from a desktop application and must not be treated as confidential. Authorization codes, access tokens, refresh tokens, and the PKCE verifier are not sent to the WebView.
+
+OAuth tokens remain in `~/.cloudreve/drives.json`, inside an owner-only directory and file. Do not choose a sync folder that contains `~/.cloudreve`; the client rejects it to prevent uploading its own credentials.
 
 Reconciliation runs every 300 seconds, with no overlapping scan for a drive. The five-minute recovery target is for the documented 10,000-file benchmark on its CI reference runner; it is not a guarantee for unavailable servers or arbitrarily large trees.
 

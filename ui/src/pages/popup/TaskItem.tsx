@@ -86,7 +86,7 @@ export default function TaskItem({ task, isActive = false }: TaskItemProps) {
       return t("popup.waitingConnection", "Waiting for connection...");
     }
     if (isActive && isStorageWaiting) {
-      return `Waiting for HTTP storage approval: ${task.blocked_origin}`;
+      return `HTTP storage blocked: ${task.blocked_origin}`;
     }
     if (isActive && liveProgress) {
       const processed = formatBytes(liveProgress.processed_bytes ?? 0);

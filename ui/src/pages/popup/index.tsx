@@ -207,7 +207,7 @@ export default function Popup() {
                 size="small"
                 onClick={handleTogglePause}
                 title={selectedDrive && summary?.drives.find((drive) => drive.id === selectedDrive)?.transport_consent_required
-                  ? "HTTP consent required in Settings"
+                  ? "HTTPS required: remove this drive and add its HTTPS address in Settings"
                   : isPaused
                   ? t("popup.resume", "Resume sync")
                   : t("popup.pause", "Pause sync")}

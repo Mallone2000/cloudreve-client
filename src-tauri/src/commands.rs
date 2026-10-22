@@ -105,8 +105,6 @@ pub struct AddDriveArgs {
     pub local_path: String,
     pub user_id: String,
     pub drive_id: Option<String>,
-    #[serde(default)]
-    pub allow_insecure_http: bool,
 }
 
 pub(crate) async fn add_drive_with_tokens(
@@ -137,7 +135,6 @@ pub(crate) async fn add_drive_with_tokens(
                 config.site_url,
                 credentials,
                 &config.user_id,
-                config.allow_insecure_http,
             )
             .await
             .map_err(|e| e.to_string())?;
@@ -162,8 +159,9 @@ pub(crate) async fn add_drive_with_tokens(
         raw_icon_path: None,
         enabled: true,
         user_id: config.user_id,
-        allow_insecure_http: config.allow_insecure_http,
+        allow_insecure_http: false,
         approved_http_storage_origins: Vec::new(),
+        tls_root_certificate_pem: None,
         ignore_patterns: Vec::new(),
         max_file_size_mb: 3072,
         sse_client_id,
@@ -202,27 +200,6 @@ pub async fn remove_drive(
         .await
         .map_err(|e| e.to_string())?;
     Ok(result)
-}
-
-#[tauri::command]
-pub async fn set_insecure_http_consent(
-    state: State<'_, AppStateHandle>,
-    drive_id: String,
-    allow: bool,
-) -> CommandResult<()> {
-    let app_state = state
-        .get()
-        .ok_or_else(|| "App not yet initialized".to_string())?;
-    app_state
-        .drive_manager
-        .set_insecure_http_consent(&drive_id, allow)
-        .await
-        .map_err(|e| e.to_string())?;
-    app_state
-        .drive_manager
-        .persist()
-        .await
-        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -299,23 +276,6 @@ pub async fn set_drive_max_file_size(
         .set_drive_max_file_size(&drive_id, max_mb)
         .await
         .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn set_http_storage_origin_consent(
-    state: State<'_, AppStateHandle>,
-    drive_id: String,
-    origin: String,
-    allow: bool,
-) -> CommandResult<()> {
-    let app_state = state
-        .get()
-        .ok_or_else(|| "App not yet initialized".to_string())?;
-    app_state
-        .drive_manager
-        .set_http_storage_origin_consent(&drive_id, &origin, allow)
-        .await
-        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -665,8 +625,6 @@ pub async fn get_general_settings() -> CommandResult<GeneralSettings> {
         log_dir: ConfigManager::get_log_dir().display().to_string(),
         language: config.language,
         heartbeat_interval: config.heartbeat_interval_secs,
-        check_updates_on_startup: config.check_updates_on_startup,
-        auto_install_updates: config.auto_install_updates,
     })
 }
 
@@ -681,8 +639,6 @@ pub struct GeneralSettings {
     pub log_dir: String,
     pub language: Option<String>,
     pub heartbeat_interval: u64,
-    pub check_updates_on_startup: bool,
-    pub auto_install_updates: bool,
 }
 
 #[tauri::command]
@@ -729,20 +685,6 @@ pub async fn set_language(app: AppHandle, language: Option<String>) -> CommandRe
         let _ = window.destroy();
     }
     Ok(())
-}
-
-#[tauri::command]
-pub async fn set_check_updates_on_startup(enabled: bool) -> CommandResult<()> {
-    ConfigManager::get()
-        .set_check_updates_on_startup(enabled)
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn set_auto_install_updates(enabled: bool) -> CommandResult<()> {
-    ConfigManager::get()
-        .set_auto_install_updates(enabled)
-        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

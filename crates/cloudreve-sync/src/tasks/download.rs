@@ -705,7 +705,8 @@ mod url_policy_tests {
             .is_ok()
         );
         assert!(
-            validate_download_url_with_storage("http://cloud.example:5212/file", &approved).is_ok()
+            validate_download_url_with_storage("http://cloud.example:5212/file", &approved)
+                .is_err()
         );
         assert!(
             validate_download_url_with_storage(
@@ -732,7 +733,7 @@ mod url_policy_tests {
             &approved
         ));
         let insecure = Url::parse("http://cloud.example:5212/file").unwrap();
-        assert!(allowed_download_redirect(
+        assert!(!allowed_download_redirect(
             &insecure,
             &Url::parse("http://cloud.example:5212/next").unwrap(),
             &approved

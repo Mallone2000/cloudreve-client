@@ -38,7 +38,6 @@ struct OAuthSession {
     state: String,
     verifier: String,
     started: Instant,
-    allow_insecure_http: bool,
     callback: Option<OAuthCallback>,
 }
 
@@ -77,13 +76,13 @@ struct TokenResponse {
     refresh_token_expires_in: u64,
 }
 
-fn normalise_site(input: &str, allow_insecure_http: bool) -> Result<Url, String> {
+fn normalise_site(input: &str) -> Result<Url, String> {
     let mut url = Url::parse(input.trim()).map_err(|_| "Invalid site URL".to_string())?;
     if url.host_str().is_none() || url.username() != "" || url.password().is_some() {
         return Err("Site URL must have a host and no embedded credentials".into());
     }
-    if url.scheme() != "https" && !(url.scheme() == "http" && allow_insecure_http) {
-        return Err("HTTPS is required unless insecure HTTP was explicitly accepted".into());
+    if url.scheme() != "https" {
+        return Err("HTTPS is required".into());
     }
     url.set_path("/");
     url.set_query(None);
@@ -142,9 +141,8 @@ fn version_supported(version: &str) -> bool {
 pub async fn begin_oauth(
     manager: State<'_, OAuthManager>,
     site_url: String,
-    allow_insecure_http: bool,
 ) -> Result<BeginOAuthResult, String> {
-    let site = normalise_site(&site_url, allow_insecure_http)?;
+    let site = normalise_site(&site_url)?;
     let client = http_client()?;
     let ping_url = site
         .join("/api/v4/site/ping")
@@ -193,7 +191,6 @@ pub async fn begin_oauth(
             state,
             verifier,
             started: Instant::now(),
-            allow_insecure_http,
             callback: None,
         },
     );
@@ -220,6 +217,9 @@ fn accept_callback(
     sessions: &mut HashMap<String, OAuthSession>,
     raw: &str,
 ) -> Option<CallbackNotice> {
+    if raw.len() > 8192 {
+        return None;
+    }
     let url = Url::parse(raw).ok()?;
     if url.scheme() != "cloudreve"
         || url.host_str() != Some("callback")
@@ -331,7 +331,6 @@ pub async fn finish_oauth(
             local_path,
             user_id: callback.user_id,
             drive_id,
-            allow_insecure_http: session.allow_insecure_http,
         },
     )
     .await
@@ -343,9 +342,9 @@ mod tests {
 
     #[test]
     fn rejects_http_without_consent_and_wrong_schemes() {
-        assert!(normalise_site("http://example.com", false).is_err());
-        assert!(normalise_site("file:///tmp", true).is_err());
-        assert!(normalise_site("http://example.com", true).is_ok());
+        assert!(normalise_site("http://example.com").is_err());
+        assert!(normalise_site("file:///tmp").is_err());
+        assert!(normalise_site("https://example.com").is_ok());
     }
 
     #[test]
@@ -364,7 +363,6 @@ mod tests {
                 state: "expected".into(),
                 verifier: "verifier".into(),
                 started: Instant::now(),
-                allow_insecure_http: false,
                 callback: None,
             },
         )]);
@@ -376,6 +374,14 @@ mod tests {
         assert!(accept_callback(
             &mut sessions,
             "cloudreve://callback/desktop?state=wrong&code=secret"
+        )
+        .is_none());
+        assert!(accept_callback(
+            &mut sessions,
+            &format!(
+                "cloudreve://callback/desktop?state=expected&code={}",
+                "x".repeat(8192)
+            )
         )
         .is_none());
         assert!(accept_callback(

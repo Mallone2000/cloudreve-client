@@ -83,8 +83,15 @@ fn parse_icon_size(sizes: &str) -> Option<u32> {
 /// Build full URL from icon src and base instance URL
 fn build_icon_url(icon: &ManifestIcon, instance_url: &str) -> Result<String> {
     let base = url::Url::parse(instance_url)?;
+    if base.scheme() != "https"
+        || base.host_str().is_none()
+        || !base.username().is_empty()
+        || base.password().is_some()
+    {
+        anyhow::bail!("Site icons require HTTPS");
+    }
     let url = base.join(&icon.src)?;
-    if url.origin() != base.origin() {
+    if url.origin() != base.origin() || !url.username().is_empty() || url.password().is_some() {
         anyhow::bail!("Manifest icon points outside the Cloudreve site");
     }
     Ok(url.to_string())
@@ -111,6 +118,14 @@ fn get_extension_from_icon(icon: &ManifestIcon, url: &str) -> &'static str {
 
 /// Download an icon from URL
 async fn download_icon(client: &reqwest::Client, url: &str) -> Result<bytes::Bytes> {
+    let parsed = url::Url::parse(url).context("Invalid icon URL")?;
+    if parsed.scheme() != "https"
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        anyhow::bail!("Site icons require HTTPS");
+    }
     let response = client
         .get(url)
         .send()
@@ -250,6 +265,17 @@ mod file_safety_tests {
     use std::os::unix::fs::symlink;
 
     #[test]
+    fn manifest_icons_cannot_downgrade_to_http() {
+        let icon = ManifestIcon {
+            sizes: "64x64".into(),
+            src: "http://cloud.example/icon.png".into(),
+            icon_type: "image/png".into(),
+        };
+        assert!(build_icon_url(&icon, "https://cloud.example").is_err());
+        assert!(build_icon_url(&icon, "http://cloud.example").is_err());
+    }
+
+    #[test]
     fn icon_install_replaces_symlink_without_writing_through_it() {
         let temp = tempfile::tempdir().unwrap();
         let outside = temp.path().join("outside.txt");
@@ -301,6 +327,14 @@ async fn fetch_icons_from_remote(
     icons_dir: &PathBuf,
     hash: &str,
 ) -> Result<FaviconResult> {
+    let parsed = url::Url::parse(instance_url).context("Invalid Cloudreve site URL")?;
+    if parsed.scheme() != "https"
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        anyhow::bail!("Site icons require HTTPS");
+    }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
@@ -315,6 +349,7 @@ async fn fetch_icons_from_remote(
         .get(&manifest_url)
         .send()
         .await
+        .map_err(reqwest::Error::without_url)
         .context("Failed to fetch manifest.json")?;
     if !manifest_response.status().is_success() {
         anyhow::bail!(

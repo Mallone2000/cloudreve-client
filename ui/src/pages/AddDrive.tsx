@@ -1,4 +1,4 @@
-import { Alert, Box, Button, Checkbox, CircularProgress, Container, FormControlLabel, IconButton, InputAdornment, Snackbar, Typography } from "@mui/material";
+import { Alert, Box, Button, CircularProgress, Container, IconButton, InputAdornment, Snackbar, Typography } from "@mui/material";
 import CloseIcon from "@mui/icons-material/Close";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -38,7 +38,6 @@ export default function AddDrive({ mode = "add" }: AddDriveProps) {
   const [error, setError] = useState("");
   const [snackbarOpen, setSnackbarOpen] = useState(false);
   const [authorizeUrl, setAuthorizeUrl] = useState<string | null>(null);
-  const [allowInsecureHttp, setAllowInsecureHttp] = useState(false);
   const [pageState, setPageState] = useState<PageState>(isReauthorize ? "url_input" : "url_input");
   const [localPath, setLocalPath] = useState("");
   const [folderNotEmpty, setFolderNotEmpty] = useState(false);
@@ -74,7 +73,6 @@ export default function AddDrive({ mode = "add" }: AddDriveProps) {
     try {
       const result = await invoke<BeginOAuthResult>("begin_oauth", {
         siteUrl: urlToAuthorize.trim(),
-        allowInsecureHttp,
       });
       oauthSessionRef.current = result.session_id;
       setAuthorizeUrl(result.authorize_url);
@@ -87,7 +85,7 @@ export default function AddDrive({ mode = "add" }: AddDriveProps) {
     } finally {
       setLoading(false);
     }
-  }, [t, allowInsecureHttp]);
+  }, [t]);
 
   // Auto-start authorization flow when in reauthorize mode
   useEffect(() => {
@@ -480,7 +478,6 @@ export default function AddDrive({ mode = "add" }: AddDriveProps) {
                   value={siteUrl}
                   onChange={(e) => {
                     setSiteUrl(e.target.value);
-                    setAllowInsecureHttp(false);
                   }}
                   variant="filled"
                   type="url"
@@ -488,12 +485,7 @@ export default function AddDrive({ mode = "add" }: AddDriveProps) {
                 />
 
                 {siteUrl.trim().toLowerCase().startsWith("http://") && (
-                  <Alert severity="warning">
-                    <FormControlLabel
-                      control={<Checkbox checked={allowInsecureHttp} onChange={(event) => setAllowInsecureHttp(event.target.checked)} />}
-                      label="Allow insecure HTTP for this site. Credentials and files can be read or changed on the network."
-                    />
-                  </Alert>
+                  <Alert severity="error">This client requires HTTPS. Use the site's HTTPS address.</Alert>
                 )}
 
                 <Button
@@ -501,7 +493,7 @@ export default function AddDrive({ mode = "add" }: AddDriveProps) {
                   variant="contained"
                   size="large"
                   loading={loading}
-                  disabled={siteUrl.trim().toLowerCase().startsWith("http://") && !allowInsecureHttp}
+                  disabled={siteUrl.trim().toLowerCase().startsWith("http://")}
                   fullWidth
                 >
                   {t("addDrive.connect")}

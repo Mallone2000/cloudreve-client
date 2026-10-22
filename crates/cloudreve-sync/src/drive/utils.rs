@@ -390,6 +390,13 @@ pub fn view_online_url(
     config: &DriveConfig,
 ) -> Result<String> {
     let mut base = config.instance_url.parse::<Url>()?;
+    if base.scheme() != "https"
+        || base.host_str().is_none()
+        || !base.username().is_empty()
+        || base.password().is_some()
+    {
+        anyhow::bail!("View Online requires an HTTPS Cloudreve site");
+    }
     base.set_path("/home");
 
     {
@@ -408,6 +415,13 @@ pub fn view_online_url(
 
 pub fn recycle_bin_url(config: &DriveConfig) -> Result<String> {
     let mut base = config.instance_url.parse::<Url>()?;
+    if base.scheme() != "https"
+        || base.host_str().is_none()
+        || !base.username().is_empty()
+        || base.password().is_some()
+    {
+        anyhow::bail!("Recycle Bin requires an HTTPS Cloudreve site");
+    }
     base.set_path("/home");
 
     {
@@ -582,5 +596,13 @@ mod tests {
         assert!(url.starts_with("https://cloud.example.com/home?"));
         assert!(url.contains("user_hint=user-42"));
         assert!(url.contains("trash"));
+    }
+
+    #[test]
+    fn browser_actions_reject_legacy_http_drives() {
+        let mut drive = config();
+        drive.instance_url = "http://cloud.example.com".into();
+        assert!(view_online_url("cloudreve://my/docs", None, &drive).is_err());
+        assert!(recycle_bin_url(&drive).is_err());
     }
 }

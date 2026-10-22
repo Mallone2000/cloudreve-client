@@ -29,7 +29,7 @@ pub(crate) async fn capped_response_json<T: DeserializeOwned>(
     let mut stream = response.bytes_stream();
     let mut body = Vec::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
+        let chunk = chunk.map_err(reqwest::Error::without_url)?;
         if chunk.len() > MAX_API_BODY.saturating_sub(body.len()) {
             return Err(ApiError::Other(
                 "Cloudreve API response exceeded 16 MiB".into(),
@@ -51,6 +51,8 @@ pub struct ClientConfig {
     pub client_id: String,
     /// User agent string for HTTP requests
     pub user_agent: Option<String>,
+    /// Optional additional trusted root for local TLS test servers.
+    pub tls_root_certificate_pem: Option<Vec<u8>>,
 }
 
 #[cfg(test)]
@@ -106,6 +108,7 @@ impl ClientConfig {
             timeout_seconds: 60,
             client_id: "".to_string(),
             user_agent: None,
+            tls_root_certificate_pem: None,
         }
     }
 
@@ -124,6 +127,11 @@ impl ClientConfig {
     /// Set the user agent string
     pub fn with_user_agent(mut self, user_agent: impl Into<String>) -> Self {
         self.user_agent = Some(user_agent.into());
+        self
+    }
+
+    pub fn with_tls_root_certificate(mut self, pem: Vec<u8>) -> Self {
+        self.tls_root_certificate_pem = Some(pem);
         self
     }
 }
@@ -250,6 +258,11 @@ impl Client {
         if let Some(ref user_agent) = config.user_agent {
             builder = builder.user_agent(user_agent);
         }
+        if let Some(ref pem) = config.tls_root_certificate_pem {
+            builder = builder.add_root_certificate(
+                reqwest::Certificate::from_pem(pem).expect("Invalid TLS root certificate"),
+            );
+        }
 
         let http_client = builder.build().expect("Failed to create HTTP client");
 
@@ -270,6 +283,11 @@ impl Client {
         if let Some(ref user_agent) = config.user_agent {
             sse_builder = sse_builder.user_agent(user_agent);
         }
+        if let Some(ref pem) = config.tls_root_certificate_pem {
+            sse_builder = sse_builder.add_root_certificate(
+                reqwest::Certificate::from_pem(pem).expect("Invalid TLS root certificate"),
+            );
+        }
 
         let sse_client = sse_builder.build().expect("Failed to create SSE client");
 
@@ -283,6 +301,10 @@ impl Client {
             on_credential_invalid: None,
             refresh_lock: tokio::sync::Mutex::new(()),
         }
+    }
+
+    pub fn tls_root_certificate_pem(&self) -> Option<&[u8]> {
+        self.config.tls_root_certificate_pem.as_deref()
     }
 
     /// Set a callback to be invoked when credentials are refreshed
@@ -498,7 +520,13 @@ impl Client {
         let url = self.build_url("/session/token/refresh");
         let request = RefreshTokenRequest { refresh_token };
 
-        let response = self.http_client.post(&url).json(&request).send().await?;
+        let response = self
+            .http_client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)?;
 
         let api_response: ApiResponse<Token> = capped_response_json(response).await?;
 
@@ -598,7 +626,7 @@ impl Client {
         }
 
         // Execute request
-        let response = request.send().await?;
+        let response = request.send().await.map_err(reqwest::Error::without_url)?;
         let api_response: ApiResponse<serde_json::Value> = capped_response_json(response).await?;
         let code = api_response.code;
 

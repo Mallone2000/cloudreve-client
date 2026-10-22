@@ -20,7 +20,7 @@ use tokio::sync::{Mutex, RwLock, mpsc};
 
 pub struct DriveManager {
     pub(super) drives: Arc<RwLock<HashMap<String, Arc<Mount>>>>,
-    /// Configurations awaiting explicit consent must never construct a Mount:
+    /// Legacy HTTP configurations must never construct a Mount:
     /// its task queue replays persisted work during construction.
     pending_http: Arc<RwLock<HashMap<String, DriveConfig>>>,
     config_dir: PathBuf,
@@ -35,6 +35,43 @@ pub struct DriveManager {
 
 fn same_site_origin(existing: &str, requested: &url::Url) -> bool {
     url::Url::parse(existing).is_ok_and(|url| url.origin() == requested.origin())
+}
+
+fn validate_sync_root(path: &std::path::Path, private_dir: &std::path::Path) -> Result<()> {
+    use std::path::Component;
+    let resolve = |candidate: &std::path::Path| -> Result<PathBuf> {
+        let mut existing = candidate;
+        while !existing.exists() {
+            existing = existing
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("Path has no existing parent"))?;
+        }
+        Ok(existing
+            .canonicalize()?
+            .join(candidate.strip_prefix(existing)?))
+    };
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
+    {
+        anyhow::bail!("Sync folder must be an absolute path without dot components");
+    }
+    let resolved = resolve(path)?;
+    let private_dir = resolve(private_dir)?;
+    if resolved == std::path::Path::new("/")
+        || resolved.starts_with(&private_dir)
+        || private_dir.starts_with(&resolved)
+    {
+        anyhow::bail!("Sync folder cannot include Cloudreve's private configuration");
+    }
+    if path.exists() {
+        let metadata = fs::symlink_metadata(path)?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            anyhow::bail!("Sync folder must be a real directory");
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -85,6 +122,7 @@ mod http_consent_tests {
             name: "old HTTP drive".into(),
             instance_url: server.uri(),
             sync_path: temp.path().join("sync"),
+            allow_insecure_http: true,
             ..Default::default()
         };
         manager.add_drive(config).await.unwrap();
@@ -92,6 +130,7 @@ mod http_consent_tests {
         assert!(manager.drives.read().await.is_empty());
         assert_eq!(manager.pending_http.read().await.len(), 1);
         assert!(manager.list_drives().await[0].transport_consent_required);
+        assert!(!manager.list_drives().await[0].allow_insecure_http);
         assert!(server.received_requests().await.unwrap().is_empty());
         let id = manager.list_drives().await[0].id.clone();
         assert!(
@@ -102,7 +141,6 @@ mod http_consent_tests {
                     "https://attacker.example".into(),
                     Credentials::default(),
                     "",
-                    false,
                 )
                 .await
                 .is_err()
@@ -120,6 +158,16 @@ mod http_consent_tests {
             .len(),
             1
         );
+    }
+
+    #[test]
+    fn sync_root_cannot_contain_private_credentials() {
+        let home = tempfile::tempdir().unwrap();
+        let private = home.path().join(".cloudreve");
+        std::fs::create_dir(&private).unwrap();
+        assert!(validate_sync_root(home.path(), &private).is_err());
+        assert!(validate_sync_root(&private, &private).is_err());
+        assert!(validate_sync_root(&home.path().join("Documents"), &private).is_ok());
     }
 
     #[tokio::test]
@@ -351,15 +399,26 @@ impl DriveManager {
         config.instance_url = url.origin().ascii_serialization();
         match url.scheme() {
             "https" => {}
-            "http" if !config.allow_insecure_http => {
-                // This branch must precede favicon retrieval and Mount::new.
+            "http" => {
+                // Keep legacy drives visible, but never start network activity for them.
                 let id = config.id.clone();
+                config.allow_insecure_http = false;
+                config.approved_http_storage_origins.clear();
                 self.pending_http.write().await.insert(id.clone(), config);
                 self.summary_notifier.notify();
                 return Ok(id);
             }
-            "http" => {}
-            _ => anyhow::bail!("Only HTTP and HTTPS Cloudreve sites are supported"),
+            _ => anyhow::bail!("Only HTTPS Cloudreve sites are supported"),
+        }
+        if let Some(home) = dirs::home_dir() {
+            validate_sync_root(&config.sync_path, &home.join(".cloudreve"))?;
+        }
+        config.allow_insecure_http = false;
+        config.approved_http_storage_origins.clear();
+        // Old tasks waiting for HTTP approval cannot be resumed. Reconciliation
+        // will schedule fresh work if the server now provides HTTPS storage URLs.
+        for origin in self.inventory.pending_storage_origins(&config.id)? {
+            self.inventory.cancel_storage_block(&config.id, &origin)?;
         }
         // Fetch favicon if icon_path is not set or doesn't exist
         let cached_icon_is_safe = |path: &Option<String>| {
@@ -520,81 +579,6 @@ impl DriveManager {
         result
     }
 
-    pub async fn set_insecure_http_consent(&self, id: &str, allow: bool) -> Result<()> {
-        if allow {
-            let mut config = self
-                .pending_http
-                .write()
-                .await
-                .remove(id)
-                .ok_or_else(|| anyhow::anyhow!("Drive is not awaiting HTTP consent"))?;
-            config.allow_insecure_http = true;
-            if let Err(error) = self.add_drive(config.clone()).await {
-                config.allow_insecure_http = false;
-                self.pending_http
-                    .write()
-                    .await
-                    .insert(id.to_string(), config);
-                return Err(error);
-            }
-        } else {
-            let mount = self
-                .get_drive(id)
-                .await
-                .ok_or_else(|| anyhow::anyhow!("Drive is not active"))?;
-            let config = mount.get_config().await;
-            if !url::Url::parse(&config.instance_url).is_ok_and(|url| url.scheme() == "http") {
-                anyhow::bail!("HTTPS drives do not require HTTP consent");
-            }
-            // Await an in-flight heartbeat before returning from revocation.
-            self.heartbeat_manager.stop().await;
-            self.drives.write().await.remove(id);
-            mount.shutdown().await;
-            let mut config = mount.get_config().await;
-            config.allow_insecure_http = false;
-            self.pending_http
-                .write()
-                .await
-                .insert(id.to_string(), config);
-            self.heartbeat_manager.start().await;
-        }
-        self.summary_notifier.notify();
-        Ok(())
-    }
-
-    pub async fn set_http_storage_origin_consent(
-        &self,
-        id: &str,
-        raw_origin: &str,
-        allow: bool,
-    ) -> Result<()> {
-        let origin = crate::uploader::transport::canonical_http_origin(raw_origin)?;
-        let mount = self
-            .get_drive(id)
-            .await
-            .ok_or_else(|| anyhow::anyhow!("Drive not found"))?;
-        {
-            let mut config = mount.config.write().await;
-            if allow {
-                if !config.approved_http_storage_origins.contains(&origin) {
-                    config.approved_http_storage_origins.push(origin.clone());
-                }
-            } else {
-                config
-                    .approved_http_storage_origins
-                    .retain(|value| value != &origin);
-            }
-        }
-        self.persist().await?;
-        if allow {
-            mount.task_queue.approve_storage_origin(&origin)?;
-        } else {
-            mount.task_queue.revoke_storage_origin(&origin).await?;
-        }
-        self.summary_notifier.notify();
-        Ok(())
-    }
-
     /// Update drive configuration
     pub async fn update_drive(&self, _id: &str, _config: DriveConfig) -> Result<()> {
         // let mut write_guard = self.drives.write().await;
@@ -630,18 +614,14 @@ impl DriveManager {
         instance_url: String,
         credentials: Credentials,
         user_id: &str,
-        allow_insecure_http: bool,
     ) -> Result<()> {
         let parsed = url::Url::parse(&instance_url).context("Invalid instance URL")?;
-        if !matches!(parsed.scheme(), "http" | "https")
+        if parsed.scheme() != "https"
             || parsed.host_str().is_none()
             || !parsed.username().is_empty()
             || parsed.password().is_some()
         {
-            anyhow::bail!("Reauthorization requires an HTTP(S) site without embedded credentials");
-        }
-        if parsed.scheme() == "http" && !allow_insecure_http {
-            anyhow::bail!("HTTP consent required");
+            anyhow::bail!("Reauthorization requires an HTTPS site without embedded credentials");
         }
         let instance_url = parsed.origin().ascii_serialization();
         let pending_config = { self.pending_http.write().await.remove(id) };
@@ -663,7 +643,7 @@ impl DriveManager {
             config.name = name;
             config.instance_url = instance_url;
             config.credentials = credentials;
-            config.allow_insecure_http = allow_insecure_http;
+            config.allow_insecure_http = false;
             if let Err(error) = self.add_drive(config.clone()).await {
                 self.pending_http
                     .write()
@@ -712,7 +692,7 @@ impl DriveManager {
         config.name = name;
         config.instance_url = instance_url.clone();
         config.credentials = credentials.clone();
-        config.allow_insecure_http = allow_insecure_http;
+        config.allow_insecure_http = false;
 
         // Clear icon paths - will be re-fetched
         config.icon_path = None;

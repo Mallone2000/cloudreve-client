@@ -2,8 +2,8 @@
 #
 # Prepare a release: bump the version everywhere, commit, tag.
 #
-#   ./scripts/release.sh 0.4.0          -> stable, becomes "Latest", users get updated
-#   ./scripts/release.sh 0.4.0-beta.1   -> prerelease, no auto-update pushed
+#   ./scripts/release.sh 0.4.0          -> stable release tag
+#   ./scripts/release.sh 0.4.0-beta.1   -> prerelease tag
 #
 # Deliberately stops before `git push`: pushing the tag publishes a GitHub release
 # to everyone, and that is not a step a script should take on your behalf. The
@@ -40,8 +40,8 @@ if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
   exit 1
 fi
 
-# Two files carry the version. tauri.conf.json is the bundle version the updater
-# compares; the workspace one feeds CARGO_PKG_VERSION, which is baked into the
+# Two files carry the version. tauri.conf.json is the bundle version;
+# the workspace one feeds CARGO_PKG_VERSION, which is baked into the
 # User-Agent sent to every Cloudreve server.
 jq --arg v "$VERSION" '.version = $v' src-tauri/tauri.conf.json > src-tauri/tauri.conf.json.tmp
 mv src-tauri/tauri.conf.json.tmp src-tauri/tauri.conf.json
@@ -65,9 +65,9 @@ git commit -m "chore(release): $TAG"
 git tag "$TAG"
 
 if [[ "$VERSION" == *-* ]]; then
-  KIND="prerelease — will NOT be offered to users as an update"
+  KIND="prerelease"
 else
-  KIND="stable — will become \"Latest\" and be offered to every user"
+  KIND="stable"
 fi
 
 echo
