@@ -25,6 +25,7 @@ const CLIENT_ID: &str = "393a1839-f52e-498e-9972-e77cc2241eee";
 const CLIENT_SECRET: &str = "8GaQIu3lOSdqYoDHi9cR8IZ4pvuMH8ya";
 const SCOPES: &str =
     "profile email openid offline_access UserInfo.Write Workflow.Write Files.Write Shares.Write";
+// Cloudreve first redirects the browser here, then opens cloudreve://mount.
 const CALLBACK_PATH: &str = "/callback/desktop";
 const SESSION_TTL: Duration = Duration::from_secs(600);
 
@@ -39,6 +40,7 @@ struct OAuthSession {
     verifier: String,
     started: Instant,
     callback: Option<OAuthCallback>,
+    callback_error: bool,
 }
 
 struct OAuthCallback {
@@ -55,8 +57,8 @@ pub struct BeginOAuthResult {
     site_version: String,
 }
 
-#[derive(Serialize, Clone)]
-struct CallbackNotice {
+#[derive(Debug, PartialEq, Serialize, Clone)]
+pub struct CallbackNotice {
     session_id: String,
     name: String,
 }
@@ -137,10 +139,20 @@ fn version_supported(version: &str) -> bool {
     })
 }
 
+fn new_state(reauthorize: bool) -> String {
+    let random = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    if reauthorize {
+        format!("reauthorize:{random}")
+    } else {
+        random
+    }
+}
+
 #[tauri::command]
 pub async fn begin_oauth(
     manager: State<'_, OAuthManager>,
     site_url: String,
+    reauthorize: bool,
 ) -> Result<BeginOAuthResult, String> {
     let site = normalise_site(&site_url)?;
     let client = http_client()?;
@@ -167,7 +179,7 @@ pub async fn begin_oauth(
     }
 
     let session_id = Uuid::new_v4().to_string();
-    let state = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    let state = new_state(reauthorize);
     let verifier = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
     let mut auth = site
@@ -192,6 +204,7 @@ pub async fn begin_oauth(
             verifier,
             started: Instant::now(),
             callback: None,
+            callback_error: false,
         },
     );
     Ok(BeginOAuthResult {
@@ -203,33 +216,40 @@ pub async fn begin_oauth(
 
 pub async fn handle_callback(app: AppHandle, raw: String) {
     let Some(manager) = app.try_state::<OAuthManager>() else {
+        tracing::warn!(target: "oauth", "OAuth callback arrived before session manager initialized");
         return;
     };
     let mut sessions = manager.sessions.lock().await;
-    let Some(notice) = accept_callback(&mut sessions, &raw) else {
-        return;
+    let notice = match accept_callback(&mut sessions, &raw) {
+        Ok(notice) => notice,
+        Err(reason) => {
+            tracing::warn!(target: "oauth", reason, "OAuth callback rejected");
+            return;
+        }
     };
     drop(sessions);
-    let _ = app.emit("oauth-callback", notice);
+    if app.emit("oauth-callback", notice).is_err() {
+        tracing::warn!(target: "oauth", "Could not notify authorization window of OAuth callback");
+    }
 }
 
 fn accept_callback(
     sessions: &mut HashMap<String, OAuthSession>,
     raw: &str,
-) -> Option<CallbackNotice> {
+) -> Result<CallbackNotice, &'static str> {
     if raw.len() > 8192 {
-        return None;
+        return Err("callback too large");
     }
-    let url = Url::parse(raw).ok()?;
+    let url = Url::parse(raw).map_err(|_| "invalid callback URL")?;
     if url.scheme() != "cloudreve"
-        || url.host_str() != Some("callback")
-        || url.path() != "/desktop"
+        || url.host_str() != Some("mount")
+        || !url.path().is_empty()
         || url.username() != ""
         || url.password().is_some()
         || url.port().is_some()
         || url.fragment().is_some()
     {
-        return None;
+        return Err("unexpected callback target");
     }
     let unique = |key: &str| {
         let mut values = url.query_pairs().filter(|(name, _)| name == key);
@@ -240,20 +260,32 @@ fn accept_callback(
             Some(value)
         }
     };
-    let (Some(state), Some(code)) = (unique("state"), unique("code")) else {
-        return None;
-    };
-    if state.is_empty() || code.is_empty() {
-        return None;
+    let state = unique("state").ok_or("missing or duplicate authorization state")?;
+    if state.is_empty() {
+        return Err("empty authorization state");
     }
     let Some((session_id, session)) = sessions
         .iter_mut()
         .find(|(_, session)| session.state == state)
     else {
-        return None;
+        return Err("unknown authorization state");
     };
-    if session.started.elapsed() >= SESSION_TTL || session.callback.is_some() {
-        return None;
+    if session.started.elapsed() >= SESSION_TTL {
+        return Err("authorization session expired");
+    }
+    if session.callback.is_some() || session.callback_error {
+        return Err("callback already accepted");
+    }
+    if url.query_pairs().any(|(name, _)| name == "error") {
+        if unique("error").is_none_or(|error| error.is_empty()) {
+            return Err("invalid authorization error response");
+        }
+        session.callback_error = true;
+        return Err("authorization denied by site");
+    }
+    let code = unique("code").ok_or("missing or duplicate authorization code")?;
+    if code.is_empty() {
+        return Err("empty authorization code");
     }
     let notice = CallbackNotice {
         session_id: session_id.clone(),
@@ -265,7 +297,35 @@ fn accept_callback(
         path: unique("path").unwrap_or_default(),
         user_id: unique("user_id").unwrap_or_default(),
     });
-    Some(notice)
+    Ok(notice)
+}
+
+#[tauri::command]
+pub async fn oauth_session_status(
+    manager: State<'_, OAuthManager>,
+    session_id: String,
+) -> Result<Option<CallbackNotice>, String> {
+    let sessions = manager.sessions.lock().await;
+    session_status(&sessions, &session_id)
+}
+
+fn session_status(
+    sessions: &HashMap<String, OAuthSession>,
+    session_id: &str,
+) -> Result<Option<CallbackNotice>, String> {
+    let session = sessions
+        .get(session_id)
+        .ok_or_else(|| "Authorization session expired".to_string())?;
+    if session.started.elapsed() >= SESSION_TTL {
+        return Err("Authorization session expired".into());
+    }
+    if session.callback_error {
+        return Err("Authorization was denied by Cloudreve".into());
+    }
+    Ok(session.callback.as_ref().map(|callback| CallbackNotice {
+        session_id: session_id.to_string(),
+        name: callback.name.clone(),
+    }))
 }
 
 #[tauri::command]
@@ -277,18 +337,22 @@ pub async fn finish_oauth(
     local_path: String,
     drive_id: Option<String>,
 ) -> Result<String, String> {
-    let session = manager
-        .sessions
-        .lock()
-        .await
-        .remove(&session_id)
+    let mut sessions = manager.sessions.lock().await;
+    let session = sessions
+        .get(&session_id)
         .ok_or_else(|| "Authorization session expired".to_string())?;
     if session.started.elapsed() >= SESSION_TTL {
         return Err("Authorization session expired".into());
     }
-    let callback = session
-        .callback
-        .ok_or_else(|| "Authorization callback has not arrived".to_string())?;
+    if session.callback_error {
+        return Err("Authorization was denied by Cloudreve".into());
+    }
+    if session.callback.is_none() {
+        return Err("Authorization callback has not arrived".into());
+    }
+    let session = sessions.remove(&session_id).expect("session checked above");
+    drop(sessions);
+    let callback = session.callback.expect("callback checked above");
     let base = Url::parse(&session.site_url).map_err(|_| "Invalid site URL")?;
     let token_url = base
         .join("/api/v4/session/oauth/token")
@@ -355,6 +419,12 @@ mod tests {
     }
 
     #[test]
+    fn reauthorization_state_uses_cloudreve_desktop_prefix() {
+        assert!(new_state(true).starts_with("reauthorize:"));
+        assert!(!new_state(false).starts_with("reauthorize:"));
+    }
+
+    #[test]
     fn callback_requires_exact_target_state_and_single_use() {
         let mut sessions = HashMap::from([(
             "session".into(),
@@ -364,48 +434,100 @@ mod tests {
                 verifier: "verifier".into(),
                 started: Instant::now(),
                 callback: None,
+                callback_error: false,
             },
         )]);
         assert!(accept_callback(
             &mut sessions,
-            "cloudreve://callback/other?state=expected&code=secret"
-        )
-        .is_none());
-        assert!(accept_callback(
-            &mut sessions,
-            "cloudreve://callback/desktop?state=wrong&code=secret"
-        )
-        .is_none());
-        assert!(accept_callback(
-            &mut sessions,
-            &format!(
-                "cloudreve://callback/desktop?state=expected&code={}",
-                "x".repeat(8192)
-            )
-        )
-        .is_none());
-        assert!(accept_callback(
-            &mut sessions,
-            "cloudreve://callback/desktop?state=expected&state=expected&code=secret"
-        )
-        .is_none());
-        assert!(accept_callback(
-            &mut sessions,
             "cloudreve://callback/desktop?state=expected&code=secret"
         )
-        .is_some());
+        .is_err());
+        assert!(
+            accept_callback(&mut sessions, "cloudreve://mount?state=wrong&code=secret").is_err()
+        );
         assert!(accept_callback(
             &mut sessions,
-            "cloudreve://callback/desktop?state=expected&code=secret"
+            &format!("cloudreve://mount?state=expected&code={}", "x".repeat(8192))
         )
-        .is_none());
+        .is_err());
+        assert!(accept_callback(
+            &mut sessions,
+            "cloudreve://mount?state=expected&state=expected&code=secret"
+        )
+        .is_err());
+        assert!(accept_callback(
+            &mut sessions,
+            "cloudreve://mount?state=expected&code=secret"
+        )
+        .is_ok());
+        assert!(accept_callback(
+            &mut sessions,
+            "cloudreve://mount?state=expected&code=secret"
+        )
+        .is_err());
 
         sessions.get_mut("session").unwrap().callback = None;
         sessions.get_mut("session").unwrap().started = Instant::now() - SESSION_TTL;
         assert!(accept_callback(
             &mut sessions,
-            "cloudreve://callback/desktop?state=expected&code=secret"
+            "cloudreve://mount?state=expected&code=secret"
         )
-        .is_none());
+        .is_err());
+    }
+
+    #[test]
+    fn accepted_callback_remains_available_if_ui_misses_event() {
+        let mut sessions = HashMap::from([(
+            "session".into(),
+            OAuthSession {
+                site_url: "https://cloud.example".into(),
+                state: "expected".into(),
+                verifier: "verifier".into(),
+                started: Instant::now(),
+                callback: None,
+                callback_error: false,
+            },
+        )]);
+        assert!(session_status(&sessions, "session").unwrap().is_none());
+        accept_callback(
+            &mut sessions,
+            "cloudreve://mount?state=expected&code=secret&name=My%20Drive",
+        )
+        .unwrap();
+        let notice = session_status(&sessions, "session").unwrap().unwrap();
+        assert_eq!(notice.session_id, "session");
+        assert_eq!(notice.name, "My Drive");
+        assert!(session_status(&sessions, "other").is_err());
+    }
+
+    #[test]
+    fn site_denial_is_visible_without_accepting_a_code() {
+        let mut sessions = HashMap::from([(
+            "session".into(),
+            OAuthSession {
+                site_url: "https://cloud.example".into(),
+                state: "expected".into(),
+                verifier: "verifier".into(),
+                started: Instant::now(),
+                callback: None,
+                callback_error: false,
+            },
+        )]);
+        assert_eq!(
+            accept_callback(
+                &mut sessions,
+                "cloudreve://mount?state=expected&error=access_denied"
+            ),
+            Err("authorization denied by site")
+        );
+        assert_eq!(
+            session_status(&sessions, "session").unwrap_err(),
+            "Authorization was denied by Cloudreve"
+        );
+        assert!(accept_callback(
+            &mut sessions,
+            "cloudreve://mount?state=expected&code=secret"
+        )
+        .is_err());
     }
 }

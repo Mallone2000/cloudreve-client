@@ -45,15 +45,17 @@ export default function AddDrive({ mode = "add" }: AddDriveProps) {
   const oauthSessionRef = useRef<string | null>(null);
   const hasInitialized = useRef(false);
 
+  const acceptCallback = useCallback((notice: OAuthCallbackNotice) => {
+    if (notice.session_id !== oauthSessionRef.current) return;
+    if (notice.name) setDriveName(notice.name);
+    setPageState("final_setup");
+  }, []);
+
   // Listen for deeplink events from OAuth callback
   useEffect(() => {
     let unlisten: () => void;
     listen<OAuthCallbackNotice>('oauth-callback', (event) => {
-      if (event.payload.session_id !== oauthSessionRef.current) {
-        return;
-      }
-      if (event.payload.name) setDriveName(event.payload.name);
-      setPageState("final_setup");
+      acceptCallback(event.payload);
     }).then((fn) => {
       unlisten = fn;
     });
@@ -63,7 +65,36 @@ export default function AddDrive({ mode = "add" }: AddDriveProps) {
         unlisten();
       }
     };
-  }, []);
+  }, [acceptCallback]);
+
+  // A deep link may arrive while this WebView is loading or before its event
+  // listener is ready. The accepted callback also lives in the Rust session.
+  useEffect(() => {
+    if (pageState !== "waiting") return;
+    let cancelled = false;
+    const checkStatus = async () => {
+      const sessionId = oauthSessionRef.current;
+      if (!sessionId) return;
+      try {
+        const notice = await invoke<OAuthCallbackNotice | null>("oauth_session_status", {
+          sessionId,
+        });
+        if (!cancelled && notice) acceptCallback(notice);
+      } catch (error) {
+        if (cancelled || sessionId !== oauthSessionRef.current) return;
+        const message = error instanceof Error ? error.message : String(error);
+        setError(t("addDrive.errors.connectionFailed", { message }));
+        setSnackbarOpen(true);
+        setPageState("url_input");
+      }
+    };
+    void checkStatus();
+    const timer = window.setInterval(() => void checkStatus(), 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [pageState, acceptCallback, t]);
 
   // Shared authorization logic
   const startAuthorization = useCallback(async (urlToAuthorize: string) => {
@@ -73,6 +104,7 @@ export default function AddDrive({ mode = "add" }: AddDriveProps) {
     try {
       const result = await invoke<BeginOAuthResult>("begin_oauth", {
         siteUrl: urlToAuthorize.trim(),
+        reauthorize: Boolean(isReauthorize),
       });
       oauthSessionRef.current = result.session_id;
       setAuthorizeUrl(result.authorize_url);
@@ -82,10 +114,11 @@ export default function AddDrive({ mode = "add" }: AddDriveProps) {
       const message = error instanceof Error ? error.message : String(error);
       setError(t("addDrive.errors.connectionFailed", { message }));
       setSnackbarOpen(true);
+      setPageState("url_input");
     } finally {
       setLoading(false);
     }
-  }, [t]);
+  }, [t, isReauthorize]);
 
   // Auto-start authorization flow when in reauthorize mode
   useEffect(() => {

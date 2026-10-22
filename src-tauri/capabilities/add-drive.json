@@ -11,6 +11,7 @@
     "allow-is-dir-empty",
     "allow-close-window",
     "allow-begin-oauth",
+    "allow-oauth-session-status",
     "allow-finish-oauth",
     "allow-open-folder-and-close-window"
   ]

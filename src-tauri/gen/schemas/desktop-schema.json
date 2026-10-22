@@ -429,6 +429,12 @@
           "markdownDescription": "Enables the list_drives command without any pre-configured scope."
         },
         {
+          "description": "Enables the oauth_session_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-oauth-session-status",
+          "markdownDescription": "Enables the oauth_session_status command without any pre-configured scope."
+        },
+        {
           "description": "Enables the open_folder_and_close_window command without any pre-configured scope.",
           "type": "string",
           "const": "allow-open-folder-and-close-window",
@@ -661,6 +667,12 @@
           "type": "string",
           "const": "deny-list-drives",
           "markdownDescription": "Denies the list_drives command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the oauth_session_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-oauth-session-status",
+          "markdownDescription": "Denies the oauth_session_status command without any pre-configured scope."
         },
         {
           "description": "Denies the open_folder_and_close_window command without any pre-configured scope.",

@@ -4,6 +4,7 @@ fn main() {
             "is_dir_empty",
             "list_drives",
             "begin_oauth",
+            "oauth_session_status",
             "finish_oauth",
             "remove_drive",
             "get_ignore_patterns",

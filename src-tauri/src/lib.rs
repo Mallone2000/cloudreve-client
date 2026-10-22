@@ -53,13 +53,16 @@ mod security_config_tests {
             let permissions = other["permissions"].as_array().unwrap();
             assert!(!permissions.iter().any(|permission| matches!(
                 permission.as_str(),
-                Some("allow-begin-oauth" | "allow-finish-oauth")
+                Some("allow-begin-oauth" | "allow-oauth-session-status" | "allow-finish-oauth")
             )));
         }
         let permissions = add_drive["permissions"].as_array().unwrap();
         assert!(permissions
             .iter()
             .any(|permission| permission.as_str() == Some("allow-begin-oauth")));
+        assert!(permissions
+            .iter()
+            .any(|permission| permission.as_str() == Some("allow-oauth-session-status")));
         assert!(permissions
             .iter()
             .any(|permission| permission.as_str() == Some("allow-finish-oauth")));
@@ -380,6 +383,7 @@ pub fn run() {
             commands::is_dir_empty,
             commands::list_drives,
             oauth::begin_oauth,
+            oauth::oauth_session_status,
             oauth::finish_oauth,
             commands::remove_drive,
             commands::get_ignore_patterns,
