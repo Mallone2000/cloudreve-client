@@ -4,7 +4,7 @@ version.workspace = true
 description = "Cloudreve Desktop Sync Client (macOS/Linux)"
 authors = ["cloudreve"]
 edition = "2021"
-rust-version = "1.89"
+rust-version = "1.90"
 
 [lib]
 name = "app_lib"

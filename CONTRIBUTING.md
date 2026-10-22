@@ -31,19 +31,19 @@ You will need:
 
 - [Rust](https://rustup.rs) (stable toolchain)
 - [Node.js](https://nodejs.org) + [Yarn](https://yarnpkg.com)
-- [cargo-tauri](https://tauri.app/start/prerequisites/) CLI and the Tauri platform prerequisites for your OS
+- The [Tauri platform prerequisites](https://tauri.app/start/prerequisites/) for your OS. The Tauri CLI is installed with the frontend dependencies.
 
 ### Building and running
 
 ```sh
 # Install frontend dependencies
-cd ui && yarn install && cd ..
+cd ui && yarn install --frozen-lockfile && cd ..
 
 # Run in development mode (starts Vite + Tauri)
-cargo tauri dev
+ui/node_modules/.bin/tauri dev
 
-# Debug build (runs `tsc -b && vite build` first)
-cargo tauri build --debug
+# Debug build without release bundles (runs `tsc -b && vite build` first)
+ui/node_modules/.bin/tauri build --debug --no-bundle
 
 # Quick Rust-only check
 cargo check -p cloudreve-sync -p cloudreve-desktop
@@ -51,6 +51,20 @@ cargo check -p cloudreve-sync -p cloudreve-desktop
 # Lint the frontend
 cd ui && yarn lint
 ```
+
+### Build for local use on macOS
+
+From the repository root, run:
+
+```sh
+./scripts/build-local-macos.sh
+```
+
+This creates `target/release/bundle/macos/Cloudreve.app` with an ad hoc signature
+and verifies the bundle. You can copy the app into `/Applications` or run it from
+the build directory. This local build does not require an Apple Developer ID or
+the release updater signing key. Run `yarn install --frozen-lockfile` in `ui/`
+first if you have not installed the frontend dependencies yet.
 
 ### Running the tests
 
@@ -126,7 +140,7 @@ The UI is translated in 11 languages under `ui/public/locales/<lng>/common.json`
 ### 4. Before opening a pull request
 
 - Make sure `cargo test -p cloudreve-sync` passes.
-- Make sure `cargo check` passes and the frontend builds (`cargo tauri build --debug`).
+- Make sure `cargo check` passes and the frontend builds (`ui/node_modules/.bin/tauri build --debug --no-bundle`).
 - Run `yarn lint` in `ui/` for frontend changes.
 - Rebase on the latest `main` if needed.
 
