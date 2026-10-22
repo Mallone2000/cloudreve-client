@@ -147,8 +147,8 @@ impl ConfigManager {
             return Ok(AppConfig::default());
         }
 
-        crate::utils::secure_fs::restrict_file(path)?;
-        let content = fs::read_to_string(path).context("Failed to read config file")?;
+        let content =
+            crate::utils::secure_fs::read_private(path).context("Failed to read config file")?;
 
         // serde's #[serde(default)] handles missing fields automatically
         let config: AppConfig =

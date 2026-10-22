@@ -33,9 +33,32 @@ pub struct DriveManager {
     heartbeat_manager: HeartbeatManager,
 }
 
+fn same_site_origin(existing: &str, requested: &url::Url) -> bool {
+    url::Url::parse(existing).is_ok_and(|url| url.origin() == requested.origin())
+}
+
 #[cfg(test)]
 mod http_consent_tests {
     use super::*;
+
+    #[test]
+    fn reauthorization_origin_must_match_host_scheme_and_port() {
+        let existing = "http://cloud.example:8080";
+        assert!(same_site_origin(
+            existing,
+            &url::Url::parse("http://cloud.example:8080").unwrap()
+        ));
+        for other in [
+            "https://cloud.example:8080",
+            "http://cloud.example:8081",
+            "http://other.example:8080",
+        ] {
+            assert!(!same_site_origin(
+                existing,
+                &url::Url::parse(other).unwrap()
+            ));
+        }
+    }
 
     #[tokio::test]
     async fn pending_http_drive_makes_no_startup_request_and_survives_persist() {
@@ -70,6 +93,24 @@ mod http_consent_tests {
         assert_eq!(manager.pending_http.read().await.len(), 1);
         assert!(manager.list_drives().await[0].transport_consent_required);
         assert!(server.received_requests().await.unwrap().is_empty());
+        let id = manager.list_drives().await[0].id.clone();
+        assert!(
+            manager
+                .update_drive_credentials(
+                    &id,
+                    "other site".into(),
+                    "https://attacker.example".into(),
+                    Credentials::default(),
+                    "",
+                    false,
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            manager.pending_http.read().await[&id].instance_url,
+            server.uri()
+        );
         assert_eq!(
             serde_json::from_str::<DriveState>(
                 &std::fs::read_to_string(temp.path().join("drives.json")).unwrap()
@@ -222,9 +263,8 @@ impl DriveManager {
 
         tracing::debug!(target: "drive", path = %config_file.display(), "Loading drive configurations");
 
-        crate::utils::secure_fs::restrict_file(&config_file)?;
-        let content =
-            fs::read_to_string(&config_file).context("Failed to read drive config file")?;
+        let content = crate::utils::secure_fs::read_private(&config_file)
+            .context("Failed to read drive config file")?;
 
         let state: DriveState =
             serde_json::from_str(&content).context("Failed to parse drive config")?;
@@ -604,7 +644,15 @@ impl DriveManager {
             anyhow::bail!("HTTP consent required");
         }
         let instance_url = parsed.origin().ascii_serialization();
-        if let Some(mut config) = self.pending_http.write().await.remove(id) {
+        let pending_config = { self.pending_http.write().await.remove(id) };
+        if let Some(mut config) = pending_config {
+            if !same_site_origin(&config.instance_url, &parsed) {
+                self.pending_http
+                    .write()
+                    .await
+                    .insert(id.to_string(), config);
+                anyhow::bail!("Reauthorization must use the existing site origin");
+            }
             if config.user_id != user_id {
                 self.pending_http
                     .write()
@@ -636,7 +684,7 @@ impl DriveManager {
             if config.user_id != user_id {
                 return Err(anyhow::anyhow!(t!("userIdMismatch")));
             }
-            if url::Url::parse(&config.instance_url).map(|url| url.origin())? != parsed.origin() {
+            if !same_site_origin(&config.instance_url, &parsed) {
                 anyhow::bail!("Reauthorization must use the existing site origin");
             }
         }

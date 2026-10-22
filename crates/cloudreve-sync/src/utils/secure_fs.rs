@@ -2,7 +2,40 @@
 //! restrictive filesystem permissions so other local users cannot read them.
 
 use anyhow::{Context, Result};
+use std::io::Read;
 use std::path::Path;
+
+/// Read a private file through the same descriptor whose type and permissions
+/// are checked. Reopening by path would allow a symlink swap between checks.
+pub fn read_private<P: AsRef<Path>>(path: P) -> Result<String> {
+    let path = path.as_ref();
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open(path)
+            .with_context(|| format!("Failed to open private file {}", path.display()))?;
+        if !file.metadata()?.is_file() {
+            anyhow::bail!("Private file must be a regular file: {}", path.display());
+        }
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        file
+    };
+    #[cfg(not(unix))]
+    let file = std::fs::File::open(path)?;
+    const MAX_PRIVATE_FILE: u64 = 16 * 1024 * 1024;
+    let mut contents = String::new();
+    file.take(MAX_PRIVATE_FILE + 1)
+        .read_to_string(&mut contents)
+        .with_context(|| format!("Failed to read private file {}", path.display()))?;
+    if contents.len() as u64 > MAX_PRIVATE_FILE {
+        anyhow::bail!("Private file exceeds 16 MiB: {}", path.display());
+    }
+    Ok(contents)
+}
 
 /// Write `contents` to `path`, ensuring the file is only readable and writable
 /// by the current user (mode `0600` on Unix).
@@ -135,6 +168,32 @@ mod tests {
             0o644
         );
     }
+
+    #[test]
+    fn private_read_rejects_symlinks_and_tightens_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("drives.json");
+        let link = dir.path().join("link.json");
+        std::fs::write(&file, b"secret").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        assert!(read_private(&link).is_err());
+        assert_eq!(read_private(&file).unwrap(), "secret");
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn private_directory_rejects_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        let link = dir.path().join("link");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(restrict_dir(&link).is_err());
+    }
 }
 
 /// Restrict a directory to owner-only access (`0700`) on Unix so its contents
@@ -143,9 +202,16 @@ mod tests {
 pub fn restrict_dir<P: AsRef<Path>>(path: P) -> Result<()> {
     #[cfg(unix)]
     {
+        use std::os::unix::fs::OpenOptionsExt;
         use std::os::unix::fs::PermissionsExt;
         let path = path.as_ref();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        let directory = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)
+            .with_context(|| format!("Failed to open private directory {}", path.display()))?;
+        directory
+            .set_permissions(std::fs::Permissions::from_mode(0o700))
             .with_context(|| format!("Failed to set permissions on {}", path.display()))?;
     }
     #[cfg(not(unix))]

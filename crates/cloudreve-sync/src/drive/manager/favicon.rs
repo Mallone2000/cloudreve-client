@@ -109,11 +109,6 @@ fn get_extension_from_icon(icon: &ManifestIcon, url: &str) -> &'static str {
     }
 }
 
-/// Check if the icon is already in ICO format
-fn is_ico_format(icon: &ManifestIcon, url: &str) -> bool {
-    icon.icon_type.contains("x-icon") || url.ends_with(".ico")
-}
-
 /// Download an icon from URL
 async fn download_icon(client: &reqwest::Client, url: &str) -> Result<bytes::Bytes> {
     let response = client
@@ -158,15 +153,18 @@ fn get_fallback_icon(_icon_type: IconType) -> Result<Vec<u8>> {
 }
 
 /// Save icon bytes to destination, converting to ICO if needed
-fn save_icon(
-    bytes: &[u8],
-    dest_path: &PathBuf,
-    convert_to_ico: bool,
-    is_already_ico: bool,
-) -> Result<()> {
-    let output = if convert_to_ico && !is_already_ico {
+fn save_icon(bytes: &[u8], dest_path: &PathBuf, convert_to_ico: bool) -> Result<()> {
+    let output = if convert_to_ico {
         // Convert image to ICO format
-        let img = image::load_from_memory(bytes).context("Failed to load image")?;
+        let mut reader = image::io::Reader::new(std::io::Cursor::new(bytes))
+            .with_guessed_format()
+            .context("Failed to identify icon format")?;
+        let mut limits = image::io::Limits::default();
+        limits.max_image_width = Some(4096);
+        limits.max_image_height = Some(4096);
+        limits.max_alloc = Some(64 * 1024 * 1024);
+        reader.limits(limits);
+        let img = reader.decode().context("Failed to load image")?;
         // Resize to 64x64 for ICO
         let resized = img.resize(64, 64, image::imageops::FilterType::Lanczos3);
         let mut encoded = std::io::Cursor::new(Vec::new());
@@ -230,7 +228,7 @@ pub async fn fetch_and_save_favicon(instance_url: &str) -> Result<FaviconResult>
     // Fallback: use bundled icons
     // Small icon fallback
     let small_bytes = get_fallback_icon(IconType::Small)?;
-    save_icon(&small_bytes, &ico_path, false, true)?;
+    save_icon(&small_bytes, &ico_path, true)?;
     tracing::debug!(target: "drive::favicon", path = %ico_path.display(), "Fallback ICO saved");
 
     // Large icon fallback
@@ -258,7 +256,7 @@ mod file_safety_tests {
         std::fs::write(&outside, b"keep").unwrap();
         let cache = temp.path().join("icon.png");
         symlink(&outside, &cache).unwrap();
-        save_icon(b"new icon", &cache, false, false).unwrap();
+        save_icon(b"new icon", &cache, false).unwrap();
         assert_eq!(std::fs::read(&outside).unwrap(), b"keep");
         assert_eq!(std::fs::read(&cache).unwrap(), b"new icon");
         assert!(
@@ -283,6 +281,17 @@ mod file_safety_tests {
         assert!(icon_path_is_safe(&inside, &cache));
         assert!(!icon_path_is_safe(&outside, &cache));
         assert!(!icon_path_is_safe(&link, &cache));
+    }
+
+    #[test]
+    fn oversized_icon_dimensions_are_rejected_before_conversion() {
+        let temp = tempfile::tempdir().unwrap();
+        let image = image::DynamicImage::new_rgba8(4097, 1);
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image
+            .write_to(&mut bytes, image::ImageOutputFormat::Png)
+            .unwrap();
+        assert!(save_icon(&bytes.into_inner(), &temp.path().join("icon.ico"), true).is_err());
     }
 }
 
@@ -370,12 +379,11 @@ async fn fetch_icons_from_remote(
     let raw_path = icons_dir.join(format!("{}_raw.{}", hash, raw_extension));
 
     // Save small icon as ICO
-    let is_already_ico = is_ico_format(smallest_icon, &smallest_icon_url);
-    save_icon(&small_bytes, &ico_path, true, is_already_ico)?;
+    save_icon(&small_bytes, &ico_path, true)?;
     tracing::debug!(target: "drive::favicon", path = %ico_path.display(), "ICO saved");
 
     // Save large icon as raw
-    save_icon(&large_bytes, &raw_path, false, false)?;
+    save_icon(&large_bytes, &raw_path, false)?;
     tracing::debug!(target: "drive::favicon", path = %raw_path.display(), "Raw icon saved");
 
     tracing::info!(target: "drive::favicon", ico_path = %ico_path.display(), raw_path = %raw_path.display(), "Favicon saved successfully");

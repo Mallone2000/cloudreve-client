@@ -30,8 +30,14 @@ jobs:
 
       - name: Resolve release metadata
         id: meta
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          TAG="$INPUT_TAG"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "Invalid release tag" >&2
+            exit 1
+          fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           # Semver: a prerelease is anything carrying a `-` suffix (-alpha, -beta,
           # -rc). GitHub excludes prereleases from `releases/latest`, which is the
@@ -119,7 +125,7 @@ jobs:
           node-version: '20'
 
       - name: Install Yarn
-        run: npm install -g yarn
+        run: npm install -g yarn@1.22.22
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -144,8 +150,10 @@ jobs:
             pkg-config
 
       - name: Set app version from tag
+        env:
+          RELEASE_TAG: ${{ needs.create-release.outputs.tag }}
         run: |
-          VERSION="${{ needs.create-release.outputs.tag }}"
+          VERSION="$RELEASE_TAG"
           VERSION="${VERSION#v}"
           # Two sources to patch: the bundle version shown to users and compared by
           # the updater, and the crate version that `CARGO_PKG_VERSION` bakes into
@@ -158,7 +166,7 @@ jobs:
 
       - name: Install frontend dependencies
         working-directory: ui
-        run: yarn install
+        run: yarn install --frozen-lockfile
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0.6.2
